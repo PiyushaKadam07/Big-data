@@ -11,6 +11,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 import json
+import re
+
+STOPWORDS = {"a", "an", "the", "is", "in", "of", "and", "or", "to", "for", "with", "on", "at"}
+TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 # ─── Data Structures ──────────────────────────────────────────────────────────
@@ -77,8 +81,10 @@ class IndexNode:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
-        stopwords = {"a","an","the","is","in","of","and","or","to","for","with","on","at"}
-        return [w.lower() for w in text.split() if w.isalpha() and w.lower() not in stopwords]
+        # A token is letters/digits, optionally joined by hyphens: "b-tree", "real-time", "s3".
+        # Punctuation around a word is ignored, so "sharding." becomes "sharding".
+        words = TOKEN_PATTERN.findall(text.lower())
+        return [w for w in words if w not in STOPWORDS]
 
 
 # ─── Central Metadata Index ───────────────────────────────────────────────────
