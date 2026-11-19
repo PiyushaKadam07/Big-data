@@ -1,7 +1,7 @@
 """
 Hybrid Indexing System - Streamlit app
 CS63016 · Kent State University
-Shahbaz Shaikh · Piyusha Kadam · Mohammed Rameez Usman
+Piyusha Kadam
 
 Run with:  streamlit run app.py
 """
@@ -129,7 +129,7 @@ with st.sidebar:
         source = "sample"
         st.caption(f"Searching {len(SAMPLE_DOCS)} sample sentences. Run load_arxiv.py to search real papers.")
     st.markdown("---")
-    st.markdown("**Team**  \nShahbaz Shaikh  \nPiyusha Kadam  \nMohammed Rameez Usman")
+    st.markdown("Built by **Piyusha Kadam**")
 
 with st.spinner("Building the index (the first time takes a few seconds)…"):
     system = build_system(num_nodes, strategy, source)

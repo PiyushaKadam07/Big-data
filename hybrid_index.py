@@ -1,6 +1,6 @@
 """
 Hybrid Indexing System: Centralized Metadata + Distributed Index Layer
-CS63016 Project - Shahbaz Shaikh, Piyusha Kadam, Mohammed Rameez Usman
+CS63016 (Big Data), Kent State University - Piyusha Kadam
 
 Three ways to search the same documents:
   centralized  - one index holds every document

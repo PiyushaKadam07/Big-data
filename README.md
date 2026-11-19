@@ -14,9 +14,9 @@ When a collection gets too big for one machine, you split it across servers. The
 
 All three return the same results. What changes is how many servers each search has to contact, which on a real network is what costs time and money.
 
-## What we found
+## What I found
 
-We indexed 2,000 documents across 2 to 16 servers and ran 60 searches at each size.
+I indexed 2,000 documents across 2 to 16 servers and ran 60 searches at each size.
 
 ![Servers asked per search as the system grows](assets/scale_chart.png)
 
@@ -28,7 +28,7 @@ We indexed 2,000 documents across 2 to 16 servers and ran 60 searches at each si
 
 The interesting part is the middle row. The directory only helps if it can rule servers out, and with random placement almost every topic ends up on almost every server, so there's little to skip. Once documents on the same topic are kept on the same server, hybrid search contacts about 3 servers no matter how big the system gets, roughly 79% fewer than broadcasting to all 16.
 
-We also checked that hybrid and centralized search return exactly the same ranked results for every test query, so the savings don't come at the cost of missing documents.
+I also checked that hybrid and centralized search return exactly the same ranked results for every test query, so the savings don't come at the cost of missing documents.
 
 ## How it works
 
@@ -95,10 +95,10 @@ assets/                screenshots used in this README
 
 ## Limitations
 
-- Everything runs in one Python process. The "servers" are objects, not separate machines, so we measure servers contacted rather than real network time.
+- Everything runs in one Python process. The "servers" are objects, not separate machines, so the app measures servers contacted rather than real network time.
 - The scale experiment still uses generated documents. Running it on the arXiv sample is the next step.
 - Topic placement assumes each document has a topic label. Real systems would need to cluster documents or route by category.
 
-## Team
+## Author
 
-Shahbaz Shaikh, Piyusha Kadam, Mohammed Rameez Usman
+Piyusha Kadam
