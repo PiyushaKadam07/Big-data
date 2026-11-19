@@ -23,7 +23,15 @@ from dataclasses import dataclass, field
 
 # ─── Tokenizing ───────────────────────────────────────────────────────────────
 
-STOPWORDS = {"a", "an", "the", "is", "in", "of", "and", "or", "to", "for", "with", "on", "at"}
+# Common words that say nothing about a document's topic. Real abstracts are full of them.
+STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "in", "of", "and", "or",
+    "to", "for", "with", "on", "at", "by", "from", "as", "into", "that", "this", "these", "those",
+    "it", "its", "we", "our", "us", "they", "their", "which", "who", "can", "could", "may", "has",
+    "have", "had", "do", "does", "not", "but", "also", "such", "than", "then", "there", "both",
+    "each", "other", "more", "most", "some", "any", "all", "how", "what", "when", "where", "while",
+    "using", "based", "paper", "propose", "proposed", "show", "via",
+}
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 

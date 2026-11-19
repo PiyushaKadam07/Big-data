@@ -54,6 +54,21 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Searching real arXiv papers
+
+The app can search a sample of real computer science papers from arXiv.
+
+1. Download the [arXiv dataset from Kaggle](https://www.kaggle.com/datasets/Cornell-University/arxiv). You only need `arxiv-metadata-oai-snapshot.json`.
+2. Make a sample of 20,000 computer science papers:
+
+   ```bash
+   python load_arxiv.py path/to/arxiv-metadata-oai-snapshot.json --size 20000
+   ```
+
+3. Start the app again. Choose **arXiv papers** in the sidebar. Each result links to the paper on arxiv.org.
+
+Each paper's main arXiv category (machine learning, computer vision, databases and so on) is used as its topic for topic placement. Indexing 20,000 papers takes a few seconds and a few hundred MB of memory.
+
 The app opens in your browser and has four pages:
 
 - **Try a search:** type a query and see which servers each approach contacted, with the matching words highlighted in the results.
@@ -73,6 +88,7 @@ pytest
 hybrid_index.py        the search engine: servers, directory, routing, BM25
 app.py                 the Streamlit app
 dataset_generator.py   generates synthetic documents for the scale experiment
+load_arxiv.py          makes a sample of computer science papers from the arXiv dataset
 tests/                 tests for tokenizing, ranking, routing and identical results
 assets/                screenshots used in this README
 ```
@@ -80,7 +96,7 @@ assets/                screenshots used in this README
 ## Limitations
 
 - Everything runs in one Python process. The "servers" are objects, not separate machines, so we measure servers contacted rather than real network time.
-- The demo uses 20 hand-written documents, and the scale experiment uses generated ones. Indexing a real dataset (arXiv paper abstracts) is the next step.
+- The scale experiment still uses generated documents. Running it on the arXiv sample is the next step.
 - Topic placement assumes each document has a topic label. Real systems would need to cluster documents or route by category.
 
 ## Team

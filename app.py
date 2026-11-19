@@ -13,6 +13,8 @@ import re
 import statistics
 import sys
 
+import json
+
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -72,11 +74,38 @@ PLACEMENTS = {
 }
 
 
+ARXIV_PATH = os.path.join(os.path.dirname(__file__), "data", "arxiv_sample.jsonl")
+CATEGORY_NAMES = {
+    "cs.AI": "Artificial intelligence", "cs.LG": "Machine learning", "cs.CL": "Language and NLP",
+    "cs.CV": "Computer vision", "cs.CR": "Security", "cs.RO": "Robotics", "cs.DC": "Distributed computing",
+    "cs.DB": "Databases", "cs.IR": "Information retrieval", "cs.SE": "Software engineering",
+    "cs.NI": "Networking", "cs.HC": "Human-computer interaction", "cs.DS": "Algorithms",
+    "cs.IT": "Information theory", "cs.SY": "Systems and control", "cs.NE": "Neural computing",
+}
+
+
+def topic_label(category: str) -> str:
+    return CATEGORY_NAMES.get(category, category)
+
+
+@st.cache_data(show_spinner=False)
+def load_arxiv_papers() -> list[dict]:
+    with open(ARXIV_PATH, encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
 @st.cache_resource(show_spinner=False)
-def build_system(num_nodes: int, strategy: str) -> HybridIndexingSystem:
+def build_system(num_nodes: int, strategy: str, source: str) -> HybridIndexingSystem:
     system = HybridIndexingSystem(num_nodes=num_nodes, strategy=strategy)
-    for i, (content, meta) in enumerate(SAMPLE_DOCS):
-        system.add_document(Document(doc_id=f"doc_{i:03d}", content=content, metadata=meta))
+    if source == "arxiv":
+        for p in load_arxiv_papers():
+            system.add_document(Document(
+                doc_id=p["id"], content=f"{p['title']}. {p['abstract']}",
+                metadata={"category": p["category"], "title": p["title"], "abstract": p["abstract"],
+                          "authors": p.get("authors", ""), "url": f"https://arxiv.org/abs/{p['id']}"}))
+    else:
+        for i, (content, meta) in enumerate(SAMPLE_DOCS):
+            system.add_document(Document(doc_id=f"doc_{i:03d}", content=content, metadata=meta))
     return system
 
 
@@ -92,11 +121,18 @@ with st.sidebar:
                                help="Topic placement keeps related documents on the same server, "
                                     "so the directory can rule out more servers.")
     strategy = PLACEMENTS[placement_label]
-    st.caption(f"Searching {len(SAMPLE_DOCS)} sample documents.")
+    if os.path.exists(ARXIV_PATH):
+        source_label = st.radio("Documents to search",
+                                [f"arXiv papers ({len(load_arxiv_papers()):,})", f"{len(SAMPLE_DOCS)} sample sentences"])
+        source = "arxiv" if source_label.startswith("arXiv") else "sample"
+    else:
+        source = "sample"
+        st.caption(f"Searching {len(SAMPLE_DOCS)} sample sentences. Run load_arxiv.py to search real papers.")
     st.markdown("---")
     st.markdown("**Team**  \nShahbaz Shaikh  \nPiyusha Kadam  \nMohammed Rameez Usman")
 
-system = build_system(num_nodes, strategy)
+with st.spinner("Building the index (the first time takes a few seconds)…"):
+    system = build_system(num_nodes, strategy, source)
 
 
 # ── Drawing the journey of a search ───────────────────────────────────────────
@@ -174,6 +210,20 @@ def highlight(content: str, terms: set[str]) -> str:
     return "".join(out)
 
 
+def snippet(text: str, terms: set[str], width: int = 280) -> str:
+    """A short piece of a long abstract around the first matching word, with matches highlighted."""
+    lower = text.lower()
+    first = next((m.start() for m in TOKEN_PATTERN.finditer(lower) if m.group() in terms), 0)
+    start = max(0, first - width // 3)
+    if start:
+        start = text.find(" ", start) + 1
+    end = min(len(text), start + width)
+    if end < len(text):
+        end = text.rfind(" ", start, end)
+    piece = highlight(text[start:end], terms)
+    return ("…" if start else "") + piece + ("…" if end < len(text) else "")
+
+
 def explain(doc: Document, terms: list[str]) -> str:
     """Why a document is in the results, in plain words."""
     stats = system.metadata.stats()
@@ -183,7 +233,7 @@ def explain(doc: Document, terms: list[str]) -> str:
     rarest = min(present, key=lambda t: stats.doc_freq.get(t, 0)) if present else None
     if rarest and len(set(terms)) > 1:
         n = stats.doc_freq.get(rarest, 0)
-        why += f" · “{html.escape(rarest)}” is a rare word here ({n} of {stats.doc_count} documents), so it counts more"
+        why += f" · “{html.escape(rarest)}” is a rare word here ({n:,} of {stats.doc_count:,} documents), so it counts more"
     return why
 
 
@@ -196,14 +246,20 @@ def page_search():
         "This compares three ways of searching them. All three find the **same documents** — "
         "the difference is how much work it takes.")
 
-    examples = ["consistent hashing", "NoSQL databases", "fault tolerance replication",
-                "distributed indexing nodes", "real time indexing", "B-Tree indexes"]
+    if source == "arxiv":
+        examples = ["graph neural networks", "differential privacy", "robot grasping",
+                    "query optimization", "speech recognition", "federated learning"]
+    else:
+        examples = ["consistent hashing", "NoSQL databases", "fault tolerance replication",
+                    "distributed indexing nodes", "real time indexing", "B-Tree indexes"]
 
     def pick():
         if st.session_state.example:
             st.session_state.query = st.session_state.example
 
-    st.session_state.setdefault("query", examples[0])
+    if st.session_state.get("query_source") != source:
+        st.session_state.query = examples[0]
+        st.session_state.query_source = source
     st.text_input("What are you looking for?", key="query")
     st.pills("Or try one of these", examples, key="example", on_change=pick)
 
@@ -223,10 +279,10 @@ def page_search():
     if found == 0:
         headline = f"No document contains those words. The directory knew that, so hybrid asked **no servers at all**."
     elif asked < n:
-        headline = (f"All three found the same **{found} document{'s' if found != 1 else ''}**. "
+        headline = (f"All three found the same **{found:,} document{'s' if found != 1 else ''}**. "
                     f"Hybrid asked **{asked} of {n} servers** and skipped **{n - asked}** that had nothing to offer.")
     else:
-        headline = (f"All three found the same **{found} documents**. Your words appear on every server, "
+        headline = (f"All three found the same **{found:,} documents**. Your words appear on every server, "
                     f"so hybrid had to ask all {n}, the same as distributed. Hybrid saves the most on specific searches.")
     headline = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", headline)
     st.markdown(f"<p class='headline'>{headline}</p>", unsafe_allow_html=True)
@@ -253,17 +309,23 @@ def page_search():
     term_set = set(terms)
     for i, r in enumerate(results, 1):
         doc = system.get_document(r.doc_id)
-        topic = doc.metadata.get("category", "")
+        topic = topic_label(doc.metadata.get("category", ""))
+        if "title" in doc.metadata:
+            body = (f"<p class='doc'><a href='{html.escape(doc.metadata['url'])}' target='_blank'>"
+                    f"{highlight(doc.metadata['title'], term_set)}</a></p>"
+                    f"<p class='why'>{snippet(doc.metadata['abstract'], term_set)}</p>")
+        else:
+            body = f"<p class='doc'>{highlight(doc.content, term_set)}</p>"
         st.markdown(
             f"<div class='card'><div class='rank'>{i}</div><div>"
-            f"<p class='doc'>{highlight(doc.content, term_set)}</p>"
+            f"{body}"
             f"<p class='why'>{explain(doc, terms)}</p>"
             f"<div class='meter' title='Match strength'><span style='width:{100 * r.score / best:.0f}%'></span></div>"
             f"<p class='why' style='margin-top:0.35rem'>Stored on {server_name(r.node_id)}"
             f"<span class='chip'>{html.escape(topic)}</span></p>"
             f"</div></div>", unsafe_allow_html=True)
     if found > len(results):
-        st.caption(f"Showing the best {len(results)} of {found} matches. The bar shows how strong each match is "
+        st.caption(f"Showing the best {len(results)} of {found:,} matches. The bar shows how strong each match is "
                    f"compared with the best one.")
     else:
         st.caption("The bar shows how strong each match is compared with the best one.")
@@ -414,14 +476,19 @@ def page_inside():
     with left:
         choice = st.selectbox("Pick a server to see what it holds", list(system.nodes), format_func=server_name)
         node = system.nodes[choice]
-        topics = sorted({d.metadata.get("category", "") for d in node.documents.values()})
-        st.markdown(f"**{server_name(choice)}** holds {len(node.documents)} documents "
+        topics = sorted({topic_label(d.metadata.get("category", "")) for d in node.documents.values()})
+        st.markdown(f"**{server_name(choice)}** holds {len(node.documents):,} documents "
                     f"about: {', '.join(topics)}.")
-        for doc in node.documents.values():
+        shown = list(node.documents.values())[:25]
+        for doc in shown:
+            text = (f"<a href='{html.escape(doc.metadata['url'])}' target='_blank'>{html.escape(doc.metadata['title'])}</a>"
+                    if "title" in doc.metadata else html.escape(doc.content))
             st.markdown(f"<div class='card' style='grid-template-columns:1fr'><div>"
-                        f"<p class='doc'>{html.escape(doc.content)}</p>"
-                        f"<span class='chip' style='margin-left:0'>{html.escape(doc.metadata.get('category', ''))}</span>"
+                        f"<p class='doc'>{text}</p>"
+                        f"<span class='chip' style='margin-left:0'>{html.escape(topic_label(doc.metadata.get('category', '')))}</span>"
                         f"</div></div>", unsafe_allow_html=True)
+        if len(node.documents) > len(shown):
+            st.caption(f"Showing the first {len(shown)} of {len(node.documents):,}.")
     with right:
         st.markdown("#### Ask the directory")
         word = st.text_input("Which servers have this word?", placeholder="e.g. hashing, b-tree, search")
