@@ -48,8 +48,8 @@ Placement options:
 You'll need Python 3.10 or newer.
 
 ```bash
-git clone https://github.com/PiyushaKadam07/Big-data.git
-cd Big-data
+git clone https://github.com/PiyushaKadam07/Big-data-Hybrid-Indexing.git
+cd Big-data-Hybrid-Indexing
 pip install -r requirements.txt
 streamlit run app.py
 ```
