@@ -188,7 +188,9 @@ class HybridIndexingSystem:
     """
 
     def __init__(self, num_nodes: int = 4, strategy: str = "hash", network_delay_ms: float = 0.0):
-        self.strategy = strategy  # "hash" (random spread), "topic" (same topic together) or "range"
+        if strategy not in ("hash", "topic"):
+            raise ValueError(f"strategy must be 'hash' or 'topic', not {strategy!r}")
+        self.strategy = strategy  # "hash" (random spread) or "topic" (same topic together)
         self.topic_home: dict[str, str] = {}  # topic -> node, used by the "topic" strategy
         self.network_delay_ms = network_delay_ms
         self.nodes: dict[str, IndexNode] = {
@@ -218,12 +220,9 @@ class HybridIndexingSystem:
                 load = Counter(self.topic_home.values())
                 self.topic_home[topic] = min(self.node_ids, key=lambda n: (load[n], n))
             return self.topic_home[topic]
-        if self.strategy == "hash":
-            h = int(hashlib.md5(doc.doc_id.encode()).hexdigest(), 16)
-            return self.node_ids[h % len(self.node_ids)]
-        # "range": by the number in the id (round-robin on ids; true key ranges come with the arXiv data)
-        idx = int(doc.doc_id.split("_")[-1]) % len(self.node_ids)
-        return self.node_ids[idx]
+        # "hash": spread documents evenly and at random by hashing their id
+        h = int(hashlib.md5(doc.doc_id.encode()).hexdigest(), 16)
+        return self.node_ids[h % len(self.node_ids)]
 
     def add_document(self, doc: Document):
         node_id = self._assign_node(doc)

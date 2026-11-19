@@ -78,3 +78,8 @@ def test_topic_placement_keeps_a_topic_on_one_node_and_still_matches_centralized
     assert all(len(nodes) == 1 for nodes in homes.values())
     for query in QUERIES:
         assert ids(s.hybrid_search(query)) == ids(s.centralized_search(query))
+
+
+def test_unknown_placement_is_rejected():
+    with pytest.raises(ValueError):
+        HybridIndexingSystem(num_nodes=2, strategy="range")
