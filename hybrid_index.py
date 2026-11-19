@@ -180,7 +180,8 @@ class HybridIndexingSystem:
     """
 
     def __init__(self, num_nodes: int = 4, strategy: str = "hash", network_delay_ms: float = 0.0):
-        self.strategy = strategy  # "hash" or "range"
+        self.strategy = strategy  # "hash" (random spread), "topic" (same topic together) or "range"
+        self.topic_home: dict[str, str] = {}  # topic -> node, used by the "topic" strategy
         self.network_delay_ms = network_delay_ms
         self.nodes: dict[str, IndexNode] = {
             f"node_{i}": IndexNode(f"node_{i}", network_delay_ms) for i in range(num_nodes)
@@ -200,16 +201,24 @@ class HybridIndexingSystem:
             "distributed_latency_ms": [],
         }
 
-    def _assign_node(self, doc_id: str) -> str:
+    def _assign_node(self, doc: Document) -> str:
+        if self.strategy == "topic":
+            # Keep documents on the same topic together: each topic gets a "home" node,
+            # chosen as the least-loaded node when the topic is first seen.
+            topic = doc.metadata.get("category", "other")
+            if topic not in self.topic_home:
+                load = Counter(self.topic_home.values())
+                self.topic_home[topic] = min(self.node_ids, key=lambda n: (load[n], n))
+            return self.topic_home[topic]
         if self.strategy == "hash":
-            h = int(hashlib.md5(doc_id.encode()).hexdigest(), 16)
+            h = int(hashlib.md5(doc.doc_id.encode()).hexdigest(), 16)
             return self.node_ids[h % len(self.node_ids)]
         # "range": by the number in the id (round-robin on ids; true key ranges come with the arXiv data)
-        idx = int(doc_id.split("_")[-1]) % len(self.node_ids)
+        idx = int(doc.doc_id.split("_")[-1]) % len(self.node_ids)
         return self.node_ids[idx]
 
     def add_document(self, doc: Document):
-        node_id = self._assign_node(doc.doc_id)
+        node_id = self._assign_node(doc)
         self.nodes[node_id].add_document(doc)
         self.metadata.register_document(doc, node_id)
         self.central.add_document(doc)
@@ -305,8 +314,8 @@ SAMPLE_DOCS = [
 ]
 
 
-def build_demo_system(num_nodes: int = 4) -> HybridIndexingSystem:
-    sys = HybridIndexingSystem(num_nodes=num_nodes)
+def build_demo_system(num_nodes: int = 4, strategy: str = "hash") -> HybridIndexingSystem:
+    sys = HybridIndexingSystem(num_nodes=num_nodes, strategy=strategy)
     for i, (content, meta) in enumerate(SAMPLE_DOCS):
         doc = Document(doc_id=f"doc_{i:03d}", content=content, metadata=meta)
         sys.add_document(doc)

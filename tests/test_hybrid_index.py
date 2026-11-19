@@ -67,3 +67,14 @@ def test_top_k_limits_results_but_reports_all_matches(system):
     result = system.hybrid_search("distributed indexing nodes", top_k=3)
     assert len(result["results"]) == 3
     assert result["total_matches"] > 3
+
+
+def test_topic_placement_keeps_a_topic_on_one_node_and_still_matches_centralized():
+    s = build_demo_system(num_nodes=4, strategy="topic")
+    homes = {}
+    for node_id, node in s.nodes.items():
+        for doc in node.documents.values():
+            homes.setdefault(doc.metadata["category"], set()).add(node_id)
+    assert all(len(nodes) == 1 for nodes in homes.values())
+    for query in QUERIES:
+        assert ids(s.hybrid_search(query)) == ids(s.centralized_search(query))

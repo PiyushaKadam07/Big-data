@@ -60,17 +60,17 @@ TEMPLATES = [
     "query optimizer leverages {topic_term} statistics to choose optimal execution plan",
 ]
 
-def generate_doc(doc_id, idx):
-    topic = random.choice(list(TOPICS.keys()))
+def generate_doc(doc_id, idx, rng=random):
+    topic = rng.choice(list(TOPICS.keys()))
     topic_data = TOPICS[topic]
-    term1 = random.choice(topic_data["terms"])
-    verb = random.choice(topic_data["verbs"])
+    term1 = rng.choice(topic_data["terms"])
+    verb = rng.choice(topic_data["verbs"])
     
     # Sometimes mix two topics
-    topic2 = random.choice(list(TOPICS.keys()))
-    term2 = random.choice(TOPICS[topic2]["terms"])
+    topic2 = rng.choice(list(TOPICS.keys()))
+    term2 = rng.choice(TOPICS[topic2]["terms"])
     
-    template = random.choice(TEMPLATES)
+    template = rng.choice(TEMPLATES)
     content = template.format(
         topic_term=term1,
         topic_term2=term2,
@@ -84,16 +84,16 @@ def generate_doc(doc_id, idx):
         "doc_num": idx
     }
 
-def generate_dataset(n=1000):
-    docs = []
-    for i in range(n):
-        doc_id = f"doc_{i:04d}"
-        docs.append(generate_doc(doc_id, i))
-    return docs
+def generate_dataset(n=1000, seed=None):
+    """n synthetic documents; pass a seed to get the same documents every time."""
+    rng = random.Random(seed)
+    return [generate_doc(f"doc_{i:04d}", i, rng) for i in range(n)]
 
 if __name__ == "__main__":
-    docs = generate_dataset(1000)
-    with open("/home/claude/hybrid_indexing/dataset_1000.json", "w") as f:
+    import os
+    docs = generate_dataset(1000, seed=42)
+    os.makedirs("data", exist_ok=True)
+    with open(os.path.join("data", "dataset_1000.json"), "w") as f:
         json.dump(docs, f, indent=2)
     print(f"Generated {len(docs)} documents")
     print("Sample:", docs[0])
