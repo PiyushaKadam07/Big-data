@@ -120,20 +120,34 @@ class IndexNode:
         for term, tf in Counter(terms).items():
             self.inverted_index[term][doc.doc_id] = tf
 
-    def search(self, terms: list[str], stats: CorpusStats, months: Months = None) -> list[QueryResult]:
-        """Score every local document that contains at least one query term
-        (and, if `months` is given, is dated within that range)."""
+    def search(self, terms: list[str], stats: CorpusStats, months: Months = None,
+               match_all: bool = True) -> list[QueryResult]:
+        """Score the local documents that match the query: by default they must contain
+        every query term (match_all=False accepts any of them). If `months` is given,
+        only documents dated within that range count."""
         if self.network_delay_ms:
             time.sleep(self.network_delay_ms / 1000)
         self.query_count += 1
+        unique = list(dict.fromkeys(terms))
+        allowed = None
+        if match_all:
+            # Start from the shortest list of documents and keep those that have every term.
+            postings_by_term = sorted((self.inverted_index.get(t, {}) for t in unique), key=len)
+            allowed = set(postings_by_term[0]) if postings_by_term else set()
+            for postings in postings_by_term[1:]:
+                allowed &= postings.keys()
+            if not allowed:
+                return []
         scores: dict[str, float] = defaultdict(float)
-        for term in set(terms):
+        for term in unique:
             postings = self.inverted_index.get(term)
             if not postings:
                 continue
             idf = stats.idf(term)
             self.postings_scanned += len(postings)
             for doc_id, tf in postings.items():
+                if allowed is not None and doc_id not in allowed:
+                    continue
                 if months and not months[0] <= self.doc_month.get(doc_id, 0) <= months[1]:
                     continue
                 length_norm = 1 - BM25_B + BM25_B * self.doc_len[doc_id] / stats.avg_doc_len
@@ -189,13 +203,15 @@ class CentralMetadataIndex:
         return CorpusStats(doc_count=n, avg_doc_len=(self.total_terms / n) if n else 1.0,
                            doc_freq=self.doc_freq)
 
-    def route_query(self, terms: list[str], months: Months = None) -> set[str]:
-        """The smallest set of nodes that can hold a match: they must have one of the
-        terms and, if a date range is given, hold documents from that range."""
+    def route_query(self, terms: list[str], months: Months = None, match_all: bool = True) -> set[str]:
+        """The smallest set of nodes that can hold a match. With match_all a node must hold
+        every term (any of them otherwise); with a date range it must also hold documents
+        from that range."""
         self.lookups += 1
-        candidates: set[str] = set()
-        for term in terms:
-            candidates |= self.term_to_nodes.get(term, set())
+        node_sets = [self.term_to_nodes.get(t, set()) for t in dict.fromkeys(terms)]
+        if not node_sets:
+            return set()
+        candidates = set.intersection(*node_sets) if match_all else set.union(*node_sets)
         if months:
             candidates = {n for n in candidates
                           if n in self.node_months
@@ -328,11 +344,12 @@ class HybridIndexingSystem:
     # ── search ──
 
     def _query_nodes(self, node_ids: list[str], terms: list[str], stats: CorpusStats,
-                     months: Months = None) -> list[QueryResult]:
+                     months: Months = None, match_all: bool = True) -> list[QueryResult]:
         """Send the query to the given nodes at the same time and merge the answers."""
         if len(node_ids) <= 1:
-            return [r for nid in node_ids for r in self.nodes[nid].search(terms, stats, months)]
-        futures = [self._pool.submit(self.nodes[nid].search, terms, stats, months) for nid in node_ids]
+            return [r for nid in node_ids for r in self.nodes[nid].search(terms, stats, months, match_all)]
+        futures = [self._pool.submit(self.nodes[nid].search, terms, stats, months, match_all)
+                   for nid in node_ids]
         return [r for f in futures for r in f.result()]
 
     def _finish(self, mode: str, results: list[QueryResult], nodes_queried: int,
@@ -345,26 +362,29 @@ class HybridIndexingSystem:
                 "nodes_queried": nodes_queried, "total_nodes": len(self.nodes),
                 "latency_ms": elapsed, "mode": mode}
 
-    def hybrid_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
+    def hybrid_search(self, query: str, top_k: int = 10, months: Months = None,
+                      match_all: bool = True) -> dict:
         """Ask the metadata index which nodes can have matches, then query only those."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        targets = sorted(self.metadata.route_query(terms, months))
-        results = self._query_nodes(targets, terms, self.metadata.stats(), months)
+        targets = sorted(self.metadata.route_query(terms, months, match_all))
+        results = self._query_nodes(targets, terms, self.metadata.stats(), months, match_all)
         return self._finish("hybrid", results, len(targets), t0, top_k)
 
-    def distributed_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
+    def distributed_search(self, query: str, top_k: int = 10, months: Months = None,
+                           match_all: bool = True) -> dict:
         """Broadcast the query to every node, with no routing."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        results = self._query_nodes(self.node_ids, terms, self.metadata.stats(), months)
+        results = self._query_nodes(self.node_ids, terms, self.metadata.stats(), months, match_all)
         return self._finish("distributed", results, len(self.node_ids), t0, top_k)
 
-    def centralized_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
+    def centralized_search(self, query: str, top_k: int = 10, months: Months = None,
+                           match_all: bool = True) -> dict:
         """One index holding every document."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        results = self.central.search(terms, self.metadata.stats(), months)
+        results = self.central.search(terms, self.metadata.stats(), months, match_all)
         return self._finish("centralized", results, 1, t0, top_k)
 
     # ── reporting ──

@@ -154,11 +154,13 @@ with st.spinner("Building the index (the first time takes a few seconds)…"):
 
 # ── Drawing the journey of a search ───────────────────────────────────────────
 
-def matches_per_node(terms: list[str], months=None) -> dict[str, int]:
-    def in_range(node, doc_id):
-        return not months or months[0] <= node.doc_month.get(doc_id, 0) <= months[1]
-    return {nid: len({d for t in terms for d in node.inverted_index.get(t, {}) if in_range(node, d)})
-            for nid, node in system.nodes.items()}
+def matches_per_node(terms: list[str], months=None, match_all: bool = True) -> dict[str, int]:
+    """How many documents on each server match, using the same rules as the search."""
+    def count(node):
+        doc_sets = [set(node.inverted_index.get(t, {})) for t in dict.fromkeys(terms)]
+        docs = set.intersection(*doc_sets) if match_all else set.union(*doc_sets)
+        return sum(1 for d in docs if not months or months[0] <= node.doc_month.get(d, 0) <= months[1])
+    return {nid: count(node) for nid, node in system.nodes.items()}
 
 
 def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: int) -> str:
@@ -282,6 +284,12 @@ def page_search():
     st.text_input("What are you looking for?", key="query")
     st.pills("Or try one of these", examples, key="example", on_change=pick)
 
+    match_label = st.radio("Find documents containing", ["All of my words", "Any of my words"],
+                           horizontal=True,
+                           help="“All” works like Google: every word must appear. “Any” matches far more "
+                                "documents, so the directory can rarely skip a server.")
+    match_all = match_label == "All of my words"
+
     spans = [system.node_date_range(n) for n in system.nodes]
     spans = [sp for sp in spans if sp]
     months, when = None, ""
@@ -299,28 +307,35 @@ def page_search():
         st.info("Type a few words to search.")
         return
 
-    runs = {"hybrid": system.hybrid_search(query, top_k=5, months=months),
-            "distributed": system.distributed_search(query, top_k=5, months=months),
-            "centralized": system.centralized_search(query, top_k=5, months=months)}
+    runs = {"hybrid": system.hybrid_search(query, top_k=5, months=months, match_all=match_all),
+            "distributed": system.distributed_search(query, top_k=5, months=months, match_all=match_all),
+            "centralized": system.centralized_search(query, top_k=5, months=months, match_all=match_all)}
     found = runs["hybrid"]["total_matches"]
     asked = runs["hybrid"]["nodes_queried"]
     n = len(system.nodes)
 
     if found == 0:
-        headline = (f"No document{when} contains those words. Hybrid asked **{asked} of {n} servers**; "
-                    f"the rest were ruled out by the directory.")
+        words = "all of those words" if match_all and len(set(terms)) > 1 else "those words"
+        if asked == 0:
+            headline = (f"No document{when} contains {words}. The directory knew that, "
+                        f"so hybrid **didn't ask any server**.")
+        else:
+            headline = (f"No document{when} contains {words}. Hybrid asked **{asked} of {n} servers** "
+                        f"that might have had one; the directory ruled out the rest.")
     elif asked < n:
         headline = (f"All three found the same **{found:,} document{'s' if found != 1 else ''}{when}**. "
                     f"Hybrid asked **{asked} of {n} servers** and skipped **{n - asked}** that had nothing to offer.")
     else:
+        tip = ("Matching **any** word finds far more documents, so every server has one. Try **All of my words**."
+               if not match_all and len(set(terms)) > 1 else
+               "Try a more specific search, or a different placement in the sidebar.")
         headline = (f"All three found the same **{found:,} documents{when}**. Every server could have a match, "
-                    f"so hybrid had to ask all {n}, the same as distributed. Try a more specific search, "
-                    f"or a different placement in the sidebar.")
+                    f"so hybrid had to ask all {n}, the same as distributed. {tip}")
     headline = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", headline)
     st.markdown(f"<p class='headline'>{headline}</p>", unsafe_allow_html=True)
 
-    hits = matches_per_node(terms, months)
-    hybrid_asked = set(system.metadata.route_query(terms, months))
+    hits = matches_per_node(terms, months, match_all)
+    hybrid_asked = set(system.metadata.route_query(terms, months, match_all))
     cols = st.columns(3)
     for col, mode in zip(cols, ["hybrid", "distributed", "centralized"]):
         r, info = runs[mode], MODES[mode]

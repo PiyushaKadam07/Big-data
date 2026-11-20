@@ -28,10 +28,12 @@ def test_tokenizer_keeps_hyphens_and_drops_punctuation():
         "b-tree", "indexes", "key-value", "stores", "real-time", "s3", "data"]
 
 
+@pytest.mark.parametrize("match_all", [True, False])
 @pytest.mark.parametrize("query", QUERIES)
-def test_all_three_modes_return_the_same_ranked_results(system, query):
-    hybrid = system.hybrid_search(query)
-    assert ids(hybrid) == ids(system.distributed_search(query)) == ids(system.centralized_search(query))
+def test_all_three_modes_return_the_same_ranked_results(system, query, match_all):
+    hybrid = system.hybrid_search(query, match_all=match_all)
+    assert (ids(hybrid) == ids(system.distributed_search(query, match_all=match_all))
+            == ids(system.centralized_search(query, match_all=match_all)))
 
 
 @pytest.mark.parametrize("query", QUERIES)
@@ -65,7 +67,7 @@ def test_rare_words_score_higher_than_common_ones():
 
 
 def test_top_k_limits_results_but_reports_all_matches(system):
-    result = system.hybrid_search("distributed indexing nodes", top_k=3)
+    result = system.hybrid_search("distributed indexing nodes", top_k=3, match_all=False)
     assert len(result["results"]) == 3
     assert result["total_matches"] > 3
 
@@ -120,8 +122,8 @@ def test_range_placement_lets_a_date_search_skip_other_years():
     by_hash = build_demo_system(num_nodes=4, strategy="hash")
     one_year = years_to_months(2016, 2016)
     query = "distributed search data indexes"
-    assert by_range.hybrid_search(query, months=one_year)["nodes_queried"] == 1
-    assert by_hash.hybrid_search(query, months=one_year)["nodes_queried"] > 1
+    assert by_range.hybrid_search(query, months=one_year, match_all=False)["nodes_queried"] == 1
+    assert by_hash.hybrid_search(query, months=one_year, match_all=False)["nodes_queried"] > 1
 
 
 def test_topic_placement_balances_documents_when_topic_sizes_differ():
@@ -130,3 +132,21 @@ def test_topic_placement_balances_documents_when_topic_sizes_differ():
     s = HybridIndexingSystem.build(docs, num_nodes=2, strategy="topic")
     counts = sorted(len(node.documents) for node in s.nodes.values())
     assert counts == [50, 50]  # "big" alone, everything else together
+
+
+def test_all_words_is_the_default_and_any_word_is_looser():
+    s = HybridIndexingSystem(num_nodes=2)
+    s.add_document(Document("doc_0", "graph neural networks for molecules"))
+    s.add_document(Document("doc_1", "wireless networks and routing"))
+    s.add_document(Document("doc_2", "neural networks for speech"))
+    assert [r.doc_id for r in s.hybrid_search("graph neural networks")["results"]] == ["doc_0"]
+    loose = {r.doc_id for r in s.hybrid_search("graph neural networks", match_all=False)["results"]}
+    assert loose == {"doc_0", "doc_1", "doc_2"}
+
+
+def test_all_words_lets_the_directory_skip_servers_missing_any_word():
+    s = HybridIndexingSystem(num_nodes=2, strategy="topic")
+    s.add_document(Document("doc_0", "graph neural networks", {"category": "ml"}))
+    s.add_document(Document("doc_1", "wireless networks", {"category": "networking"}))
+    assert s.hybrid_search("graph networks")["nodes_queried"] == 1
+    assert s.hybrid_search("graph networks", match_all=False)["nodes_queried"] == 2

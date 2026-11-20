@@ -25,24 +25,26 @@ I indexed 2,000 documents across 2 to 16 servers and ran the same 60 searches at
 | Approach (16 servers) | Word search | Word search limited to one year |
 | --- | --- | --- |
 | Distributed | 16 | 16 |
-| Hybrid, placed randomly | 11.5 | 10.5 |
-| Hybrid, grouped by topic | **3.3** | 3.3 |
-| Hybrid, grouped by date | 11.6 | **1.7** |
+| Hybrid, placed randomly | 9.8 | 9.1 |
+| Hybrid, grouped by topic | **2.4** | 2.4 |
+| Hybrid, grouped by date | 9.8 | **1.4** |
 
 ![Servers asked per word search as the system grows](assets/scale_chart.png)
 
 ![Servers asked per search limited to one year](assets/scale_chart_dated.png)
 
-Each placement wins a different kind of search. The directory can only skip a server if it knows that server can't have a match. With random placement every topic and every year ends up on almost every server, so there's little to skip. Grouping by topic keeps word searches down to about 3 servers however big the system gets. Grouping by date does the same for searches limited to certain years, but helps plain word searches no more than random placement, because every topic shows up every year. The takeaway is to store data the way people search it.
+Each placement wins a different kind of search. The directory can only skip a server if it knows that server can't have a match. With random placement every topic and every year ends up on almost every server, so there's little to skip. Grouping by topic keeps word searches down to about 2 or 3 servers however big the system gets. Grouping by date does the same for searches limited to certain years, but helps plain word searches no more than random placement, because every topic shows up every year. The takeaway is to store data the way people search it.
 
 I also checked that hybrid and centralized search return exactly the same ranked results for every test query, with and without a date limit, so the savings don't come at the cost of missing documents.
+
+How a multi-word search matches matters too. On the arXiv sample, "graph neural networks" matched about a quarter of all 20,000 papers when any one of the words was enough, because nearly every computer science paper mentions networks. Then every server has a match and hybrid can't skip anything. Requiring all of the words, as most search engines do, gives far fewer and more relevant results, and lets the directory skip any server that is missing one of the words.
 
 ## How it works
 
 1. **Tokenizing.** Text is lowercased and split into words. Hyphenated terms like `b-tree` and `real-time` stay whole, punctuation is dropped, and filler words like "the" are ignored.
 2. **Inverted index on each server.** Each server keeps a map from every word to the documents that contain it, the same basic structure Lucene and Elasticsearch use.
 3. **Central directory (metadata index).** Records which servers hold each word, plus collection-wide word counts. It doesn't store any documents, so it stays small.
-4. **Routing.** A hybrid search asks the directory which servers have the query words, and hold documents from the requested dates if there's a date limit, then contacts only those, in parallel.
+4. **Routing.** A hybrid search asks the directory which servers hold all of the query words (or any of them, if you choose), and documents from the requested dates if there's a date limit, then contacts only those, in parallel.
 5. **Ranking with BM25.** Documents that contain more of the query words, and rarer words, rank higher. The directory supplies the collection-wide statistics so every server scores the same way, which is why all three approaches produce identical rankings.
 
 Placement options:
@@ -79,7 +81,7 @@ Each paper's main arXiv category (machine learning, computer vision, databases a
 
 The app opens in your browser and has four pages:
 
-- **Try a search:** type a query, optionally limit it to certain years, and see which servers each approach contacted, with the matching words highlighted in the results.
+- **Try a search:** type a query, choose whether results need all of your words or any of them, optionally limit it to certain years, and see which servers each approach contacted, with the matching words highlighted in the results.
 - **How it works:** a plain-language walkthrough.
 - **What happens at scale:** reruns the experiment above on 500 to 5,000 documents.
 - **Look inside the servers:** what each server holds, and which servers have a given word.
