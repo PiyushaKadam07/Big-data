@@ -67,7 +67,7 @@ def test_rare_words_score_higher_than_common_ones():
 
 
 def test_top_k_limits_results_but_reports_all_matches(system):
-    result = system.hybrid_search("distributed indexing nodes", top_k=3, match_all=False)
+    result = system.hybrid_search("distributed indexing nodes", top_k=3, match_all=False, prune=False)
     assert len(result["results"]) == 3
     assert result["total_matches"] > 3
 
@@ -150,3 +150,34 @@ def test_all_words_lets_the_directory_skip_servers_missing_any_word():
     s.add_document(Document("doc_1", "wireless networks", {"category": "networking"}))
     assert s.hybrid_search("graph networks")["nodes_queried"] == 1
     assert s.hybrid_search("graph networks", match_all=False)["nodes_queried"] == 2
+
+
+def test_pruning_skips_servers_that_cannot_reach_the_top_results():
+    s = HybridIndexingSystem(num_nodes=2, strategy="topic")
+    s.add_document(Document("doc_0", "graph graph graph neural", {"category": "ml"}))
+    s.add_document(Document("doc_1", "a long survey that mentions a graph once among many other unrelated "
+                                     "words about wireless radio channels antennas and spectrum", {"category": "net"}))
+    pruned = s.hybrid_search("graph", top_k=1)
+    full = s.hybrid_search("graph", top_k=1, prune=False)
+    assert [r.doc_id for r in pruned["results"]] == [r.doc_id for r in full["results"]] == ["doc_0"]
+    assert pruned["nodes_queried"] == 1 and full["nodes_queried"] == 2
+    assert pruned["skipped_by_score"] and not pruned["total_is_exact"]
+
+
+@pytest.mark.parametrize("strategy", ["hash", "topic", "range"])
+def test_pruned_top_results_always_match_centralized(strategy):
+    """Pruning must never change the top results. Checked on many generated searches."""
+    import random
+    from dataset_generator import TOPICS, generate_dataset
+    docs = [Document(d["id"], d["content"], {"category": d["category"], "month": d["month"]})
+            for d in generate_dataset(600, seed=7)]
+    s = HybridIndexingSystem.build(docs, num_nodes=8, strategy=strategy)
+    words = [t for topic in TOPICS.values() for t in topic["terms"]] + ["data", "distributed", "index"]
+    rng = random.Random(11)
+    for _ in range(60):
+        query = " ".join(rng.sample(words, rng.randint(1, 3)))
+        for top_k in (1, 5, 10):
+            for match_all in (True, False):
+                hybrid = s.hybrid_search(query, top_k=top_k, match_all=match_all)
+                central = s.centralized_search(query, top_k=top_k, match_all=match_all)
+                assert ids(hybrid) == ids(central), (query, top_k, match_all)

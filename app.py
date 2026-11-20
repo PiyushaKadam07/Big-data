@@ -163,7 +163,8 @@ def matches_per_node(terms: list[str], months=None, match_all: bool = True) -> d
     return {nid: count(node) for nid, node in system.nodes.items()}
 
 
-def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: int) -> str:
+def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: int,
+                not_needed: set[str] = frozenset()) -> str:
     """A small picture: the search, (the directory), and which servers were asked."""
     color = MODES[mode]["color"]
     W, box_w, box_h, gap, per_row = 352, 76, 56, 8, 4
@@ -222,7 +223,8 @@ def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: in
                     parts.append(f"<rect x='{x}' y='{y}' width='{box_w}' height='{box_h}' rx='8' fill='#f9fafb' "
                                  f"stroke='{GREY}' stroke-dasharray='4 3'/>")
                     parts.append(text(x + box_w / 2, y + 23, server_name(nid), 13, 600, "#9ca3af"))
-                    parts.append(text(x + box_w / 2, y + 42, "skipped", 13, 400, "#9ca3af"))
+                    label = "not needed" if nid in not_needed else "skipped"
+                    parts.append(text(x + box_w / 2, y + 42, label, 13, 400, "#9ca3af"))
         height = y0 + len(rows) * (box_h + 26) - 18 + (0 if one_row else 14)
     return (f"<svg viewBox='0 0 {W} {height}' width='100%' role='img' "
             f"aria-label='{MODES[mode]['name']} search path' style='max-width:{W}px'>{''.join(parts)}</svg>")
@@ -310,17 +312,23 @@ def page_search():
             months = years_to_months(*years)
             when = f" from {years[0]}" if years[0] == years[1] else f" from {years[0]}–{years[1]}"
 
+    prune = st.toggle("Skip servers that can't change the top 5", value=True,
+                      help="The directory also knows each server's best possible score. Hybrid asks the most "
+                           "promising server first, then skips servers that couldn't beat its top 5. "
+                           "The top 5 results stay exactly the same.")
+
     query = st.session_state.query.strip()
     terms = tokenize(query)
     if not terms:
         st.info("Type a few words to search.")
         return
 
-    runs = {"hybrid": system.hybrid_search(query, top_k=5, months=months, match_all=match_all),
+    runs = {"hybrid": system.hybrid_search(query, top_k=5, months=months, match_all=match_all, prune=prune),
             "distributed": system.distributed_search(query, top_k=5, months=months, match_all=match_all),
             "centralized": system.centralized_search(query, top_k=5, months=months, match_all=match_all)}
-    found = runs["hybrid"]["total_matches"]
+    found = runs["distributed"]["total_matches"]  # hybrid may stop early, so take the full count from here
     asked = runs["hybrid"]["nodes_queried"]
+    by_score = len(runs["hybrid"]["skipped_by_score"])
     n = len(system.nodes)
 
     if found == 0:
@@ -332,8 +340,15 @@ def page_search():
             headline = (f"No document{when} contains {words}. Hybrid asked **{asked} of {n} servers** "
                         f"that might have had one; the directory ruled out the rest.")
     elif asked < n:
-        headline = (f"All three found the same **{found:,} document{'s' if found != 1 else ''}{when}**. "
-                    f"Hybrid asked **{asked} of {n} servers** and skipped **{n - asked}** that had nothing to offer.")
+        no_match = n - asked - by_score
+        reasons = []
+        if no_match:
+            reasons.append(f"**{no_match}** {'have' if no_match != 1 else 'has'} no matching documents")
+        if by_score:
+            reasons.append(f"**{by_score}** couldn't beat the top 5")
+        headline = (f"All three return the same top results from **{found:,} matching document"
+                    f"{'s' if found != 1 else ''}{when}**. Hybrid asked **{asked} of {n} servers**: "
+                    f"{' and '.join(reasons)}.")
     else:
         tip = ("Matching **any** word finds far more documents, so every server has one. Try **All of my words**."
                if not match_all and len(set(terms)) > 1 else
@@ -344,7 +359,8 @@ def page_search():
     st.markdown(f"<p class='headline'>{headline}</p>", unsafe_allow_html=True)
 
     hits = matches_per_node(terms, months, match_all)
-    hybrid_asked = set(system.metadata.route_query(terms, months, match_all))
+    hybrid_asked = set(runs["hybrid"]["asked"])
+    not_needed = set(runs["hybrid"]["skipped_by_score"])
     cols = st.columns(3)
     for col, mode in zip(cols, ["hybrid", "distributed", "centralized"]):
         r, info = runs[mode], MODES[mode]
@@ -352,7 +368,8 @@ def page_search():
             st.markdown(f"<p class='mode-title' style='color:{info['color']}'>{info['name']}</p>"
                         f"<p class='mode-how'>{info['how']}</p>", unsafe_allow_html=True)
             asked_set = hybrid_asked if mode == "hybrid" else set(system.nodes)
-            st.markdown(journey_svg(mode, asked_set, hits, r["total_matches"]), unsafe_allow_html=True)
+            st.markdown(journey_svg(mode, asked_set, hits, found,
+                                    not_needed if mode == "hybrid" else frozenset()), unsafe_allow_html=True)
             servers = "1 server" if mode == "centralized" else f"{r['nodes_queried']} of {n} servers"
             st.markdown(f"<p class='mode-count'>Asked {servers}</p>", unsafe_allow_html=True)
 
@@ -413,7 +430,9 @@ def page_how():
         "1. **Your words are cleaned up.** “Consistent Hashing!” becomes `consistent`, `hashing`.\n"
         "2. **The directory is checked.** It's a small list of which words live on which servers. "
         "It doesn't store the documents, so it stays small and fast.\n"
-        "3. **Only the useful servers are asked**, all at the same time.\n"
+        "3. **Only the useful servers are asked.** The directory also knows each server's best possible "
+        "score, so after asking the most promising server it skips any server that couldn't beat the "
+        "results it already has. The rest are asked at the same time.\n"
         "4. **Each server scores its own matches.** Documents with more of your words score higher, "
         "and rare words count more than common ones.\n"
         "5. **The answers are merged** into one ranked list.")
@@ -470,11 +489,11 @@ def scale_experiment(num_docs: int) -> dict:
             s = HybridIndexingSystem.build(docs, num_nodes=n, strategy=strat)
             words, dated = [], []
             for q, y in zip(queries, years):
-                h = s.hybrid_search(q)
+                h = s.hybrid_search(q, top_k=5)
                 words.append(h["nodes_queried"])
-                dated.append(s.hybrid_search(q, months=years_to_months(y, y))["nodes_queried"])
+                dated.append(s.hybrid_search(q, top_k=5, months=years_to_months(y, y))["nodes_queried"])
                 if n == 8:
-                    c = s.centralized_search(q)
+                    c = s.centralized_search(q, top_k=5)
                     if [r.doc_id for r in h["results"]] != [r.doc_id for r in c["results"]]:
                         out["identical"] = False
             out["words"][strat].append(round(statistics.mean(words), 1))

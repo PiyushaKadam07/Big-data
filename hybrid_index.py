@@ -182,6 +182,10 @@ class CentralMetadataIndex:
         self.total_terms = 0
         self.lookups = 0
         self.node_months: dict[str, list[int]] = {}  # node -> [earliest, latest] month it holds
+        # term -> node -> the best score any single document on that node gets for the term.
+        # Each node reports these to the directory; they're refreshed when documents are added.
+        self.term_node_max: dict[str, dict[str, float]] = {}
+        self.bounds_for: tuple | None = None  # (document count, average length) the maxima were computed for
 
     def register_document(self, doc: Document, node_id: str):
         terms = tokenize(doc.content)
@@ -197,6 +201,29 @@ class CentralMetadataIndex:
 
     def update_summary(self, summary: NodeSummary):
         self.node_summaries[summary.node_id] = summary
+
+    def refresh_bounds(self, nodes: dict[str, "IndexNode"], stats: CorpusStats):
+        """Record, for every term on every node, the best score a single document there gets
+        for that term (without the rarity factor, which is applied at search time)."""
+        key = (stats.doc_count, stats.avg_doc_len)
+        if self.bounds_for == key:
+            return
+        maxima: dict[str, dict[str, float]] = defaultdict(dict)
+        for node_id, node in nodes.items():
+            lengths = node.doc_len
+            for term, postings in node.inverted_index.items():
+                maxima[term][node_id] = max(
+                    tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * lengths[d] / stats.avg_doc_len))
+                    for d, tf in postings.items())
+        self.term_node_max = maxima
+        self.bounds_for = key
+
+    def score_bound(self, node_id: str, terms: list[str], stats: CorpusStats) -> float:
+        """The highest score any document on this node could get for these terms: each term's
+        best single-document score added up. It can only overestimate (the best scores may come
+        from different documents), so skipping a node whose bound can't beat the current results
+        never changes them."""
+        return sum(stats.idf(t) * self.term_node_max.get(t, {}).get(node_id, 0.0) for t in dict.fromkeys(terms))
 
     def stats(self) -> CorpusStats:
         n = len(self.doc_to_node)
@@ -363,13 +390,38 @@ class HybridIndexingSystem:
                 "latency_ms": elapsed, "mode": mode}
 
     def hybrid_search(self, query: str, top_k: int = 10, months: Months = None,
-                      match_all: bool = True) -> dict:
-        """Ask the metadata index which nodes can have matches, then query only those."""
+                      match_all: bool = True, prune: bool = True) -> dict:
+        """
+        1. Ask the metadata index which nodes can have matches at all (words, dates).
+        2. With prune=True, also skip nodes that can't change the top results: ask the
+           most promising node first, then only the nodes whose best possible score could
+           still beat the k-th result so far. The top results are exactly the same; only
+           the total number of matches is no longer known.
+        """
         terms = tokenize(query)
         t0 = time.perf_counter()
+        stats = self.metadata.stats()
         targets = sorted(self.metadata.route_query(terms, months, match_all))
-        results = self._query_nodes(targets, terms, self.metadata.stats(), months, match_all)
-        return self._finish("hybrid", results, len(targets), t0, top_k)
+        skipped_by_score: list[str] = []
+        if prune and top_k and len(targets) > 1:
+            self.metadata.refresh_bounds(self.nodes, stats)
+            bounds = {n: self.metadata.score_bound(n, terms, stats) for n in targets}
+            order = sorted(targets, key=lambda n: (-bounds[n], n))
+            results = self.nodes[order[0]].search(terms, stats, months, match_all)
+            scores = sorted((r.score for r in results), reverse=True)
+            kth = scores[top_k - 1] if len(scores) >= top_k else None
+            rest = [n for n in order[1:] if kth is None or bounds[n] >= kth - 1e-9]
+            skipped_by_score = [n for n in order[1:] if n not in rest]
+            results += self._query_nodes(rest, terms, stats, months, match_all)
+            asked = [order[0]] + rest
+        else:
+            asked = targets
+            results = self._query_nodes(asked, terms, stats, months, match_all)
+        out = self._finish("hybrid", results, len(asked), t0, top_k)
+        out["asked"] = sorted(asked)
+        out["skipped_by_score"] = sorted(skipped_by_score)
+        out["total_is_exact"] = not skipped_by_score
+        return out
 
     def distributed_search(self, query: str, top_k: int = 10, months: Months = None,
                            match_all: bool = True) -> dict:
