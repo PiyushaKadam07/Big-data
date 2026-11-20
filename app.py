@@ -132,7 +132,7 @@ with st.sidebar:
     page = st.radio("Go to", ["Try a search", "How it works", "What happens at scale", "Look inside the servers"])
     st.markdown("---")
     st.markdown("**Setup**")
-    num_nodes = st.select_slider("Number of servers", options=[2, 4, 6, 8], value=4)
+    num_nodes = st.select_slider("Number of servers", options=[2, 4, 8, 16], value=4)
     placement_label = st.radio("How documents are placed on servers", list(PLACEMENTS), index=0,
                                help="Topic placement keeps related documents together, so word searches "
                                     "can skip servers. Date placement gives each server a range of years, "
@@ -166,7 +166,7 @@ def matches_per_node(terms: list[str], months=None, match_all: bool = True) -> d
 def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: int) -> str:
     """A small picture: the search, (the directory), and which servers were asked."""
     color = MODES[mode]["color"]
-    W, box_w, box_h, gap, per_row = 340, 76, 56, 8, 4
+    W, box_w, box_h, gap, per_row = 352, 76, 56, 8, 4
     parts, cx = [], W / 2
     top_y = 34  # room for the directory box (kept for every mode so the pictures line up)
 
@@ -196,14 +196,23 @@ def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: in
         ids = list(system.nodes)
         rows = [ids[i:i + per_row] for i in range(0, len(ids), per_row)]
         y0 = 92 + top_y
+        one_row = len(rows) == 1
+        if not one_row:
+            # Several rows: one arrow into a panel holding all the servers, so lines never cross boxes.
+            panel_top, panel_bottom = y0 - 14, y0 + len(rows) * (box_h + 26) - 26 + 14
+            parts.append(f"<line x1='{cx}' y1='{source_y}' x2='{cx}' y2='{panel_top}' stroke='{color}' stroke-width='2'/>")
+            parts.append(f"<rect x='{(W - per_row * box_w - (per_row - 1) * gap) / 2 - 8}' y='{panel_top}' "
+                         f"width='{per_row * box_w + (per_row - 1) * gap + 16}' height='{panel_bottom - panel_top}' "
+                         f"rx='10' fill='#ffffff' stroke='{color}' stroke-width='1.5'/>")
         for r, row in enumerate(rows):
             row_w = len(row) * box_w + (len(row) - 1) * gap
             for c, nid in enumerate(row):
                 x = (W - row_w) / 2 + c * (box_w + gap)
                 y = y0 + r * (box_h + 26)
                 if nid in asked:
-                    parts.append(f"<line x1='{cx}' y1='{source_y}' x2='{x + box_w / 2}' y2='{y}' "
-                                 f"stroke='{color}' stroke-width='1.5' opacity='0.8'/>")
+                    if one_row:
+                        parts.append(f"<line x1='{cx}' y1='{source_y}' x2='{x + box_w / 2}' y2='{y}' "
+                                     f"stroke='{color}' stroke-width='1.5' opacity='0.8'/>")
                     parts.append(f"<rect x='{x}' y='{y}' width='{box_w}' height='{box_h}' rx='8' fill='{color}' "
                                  f"fill-opacity='0.12' stroke='{color}' stroke-width='1.5'/>")
                     parts.append(text(x + box_w / 2, y + 23, server_name(nid), 13, 600))
@@ -214,7 +223,7 @@ def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: in
                                  f"stroke='{GREY}' stroke-dasharray='4 3'/>")
                     parts.append(text(x + box_w / 2, y + 23, server_name(nid), 13, 600, "#9ca3af"))
                     parts.append(text(x + box_w / 2, y + 42, "skipped", 13, 400, "#9ca3af"))
-        height = y0 + len(rows) * (box_h + 26) - 18
+        height = y0 + len(rows) * (box_h + 26) - 18 + (0 if one_row else 14)
     return (f"<svg viewBox='0 0 {W} {height}' width='100%' role='img' "
             f"aria-label='{MODES[mode]['name']} search path' style='max-width:{W}px'>{''.join(parts)}</svg>")
 
