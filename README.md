@@ -47,7 +47,7 @@ I also checked that hybrid and centralized search return exactly the same ranked
 
 Placement options:
 
-- **By topic:** each topic gets a home server (the least loaded one when the topic first appears).
+- **By topic:** each topic gets a home server. The biggest topics are placed first, each on the server holding the fewest documents, so servers stay balanced even when topic sizes differ a lot.
 - **By date (range placement):** the date boundaries are chosen from the data so every server holds about the same number of documents.
 - **By hash:** documents are spread evenly by hashing their ID.
 
@@ -106,6 +106,7 @@ assets/                screenshots used in this README
 - Everything runs in one Python process. The "servers" are objects, not separate machines, so the app measures servers contacted rather than real network time.
 - The scale experiment uses generated documents with example dates. Running it on the arXiv sample is the next step.
 - The 20 sample sentences are given example dates so every placement works on them.
+- Topic placement keeps a whole topic on one server. On arXiv, machine learning and computer vision are each about a fifth of all computer science papers, so with 8 or more servers those two servers end up larger than the rest. A real system would split very large topics across several servers.
 - Topic placement assumes each document has a topic label. Real systems would need to cluster documents or route by category.
 
 ## Author

@@ -188,7 +188,7 @@ def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: in
         parts.append(f"<rect x='{cx - 120}' y='{y}' width='240' height='{box_h}' rx='8' fill='{color}' "
                      f"fill-opacity='0.12' stroke='{color}' stroke-width='1.5'/>")
         parts.append(text(cx, y + 23, "One big server", 14, 600))
-        parts.append(text(cx, y + 42, f"all {system.total_docs} documents · {total_hits} found", 13, 400, MUTED))
+        parts.append(text(cx, y + 42, f"all {system.total_docs:,} documents · {total_hits:,} found", 13, 400, MUTED))
         height = 92 + top_y + box_h + 8
     else:
         ids = list(system.nodes)
@@ -206,7 +206,7 @@ def journey_svg(mode: str, asked: set[str], hits: dict[str, int], total_hits: in
                                  f"fill-opacity='0.12' stroke='{color}' stroke-width='1.5'/>")
                     parts.append(text(x + box_w / 2, y + 23, server_name(nid), 13, 600))
                     found = hits.get(nid, 0)
-                    parts.append(text(x + box_w / 2, y + 42, f"{found} found", 13, 400, MUTED))
+                    parts.append(text(x + box_w / 2, y + 42, f"{found:,} found", 13, 400, MUTED))
                 else:
                     parts.append(f"<rect x='{x}' y='{y}' width='{box_w}' height='{box_h}' rx='8' fill='#f9fafb' "
                                  f"stroke='{GREY}' stroke-dasharray='4 3'/>")

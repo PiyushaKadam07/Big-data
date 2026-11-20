@@ -216,6 +216,20 @@ def even_range_bounds(months: list[int], num_nodes: int) -> list[int]:
     return sorted(c for c in cuts if c > ordered[0])
 
 
+def balanced_topic_homes(docs: list[Document], node_ids: list[str]) -> dict[str, str]:
+    """Give each topic a home node so the nodes end up with similar numbers of documents.
+    Real collections have a few huge topics, so the biggest topics are placed first,
+    each on whichever node currently holds the fewest documents."""
+    sizes = Counter(d.metadata.get("category", "other") for d in docs)
+    load = {n: 0 for n in node_ids}
+    homes: dict[str, str] = {}
+    for topic, count in sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])):
+        node = min(node_ids, key=lambda n: (load[n], n))
+        homes[topic] = node
+        load[node] += count
+    return homes
+
+
 # ─── Hybrid Indexing System ───────────────────────────────────────────────────
 
 class HybridIndexingSystem:
@@ -269,12 +283,11 @@ class HybridIndexingSystem:
             month = doc.metadata.get("month", 0)
             return self.node_ids[bisect.bisect_right(self.range_bounds, month)]
         if self.strategy == "topic":
-            # Keep documents on the same topic together: each topic gets a "home" node,
-            # chosen as the least-loaded node when the topic is first seen.
+            # Keep documents on the same topic together: each topic gets a "home" node.
+            # A topic seen for the first time goes to the node holding the fewest documents.
             topic = doc.metadata.get("category", "other")
             if topic not in self.topic_home:
-                load = Counter(self.topic_home.values())
-                self.topic_home[topic] = min(self.node_ids, key=lambda n: (load[n], n))
+                self.topic_home[topic] = min(self.node_ids, key=lambda n: (len(self.nodes[n].documents), n))
             return self.topic_home[topic]
         # "hash": spread documents evenly and at random by hashing their id
         h = int(hashlib.md5(doc.doc_id.encode()).hexdigest(), 16)
@@ -290,6 +303,8 @@ class HybridIndexingSystem:
             bounds = even_range_bounds([d.metadata.get("month", 0) for d in docs], num_nodes)
         system = cls(num_nodes=num_nodes, strategy=strategy, network_delay_ms=network_delay_ms,
                      range_bounds=bounds)
+        if strategy == "topic":
+            system.topic_home = balanced_topic_homes(docs, system.node_ids)
         for doc in docs:
             system.add_document(doc)
         return system

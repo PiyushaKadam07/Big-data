@@ -122,3 +122,11 @@ def test_range_placement_lets_a_date_search_skip_other_years():
     query = "distributed search data indexes"
     assert by_range.hybrid_search(query, months=one_year)["nodes_queried"] == 1
     assert by_hash.hybrid_search(query, months=one_year)["nodes_queried"] > 1
+
+
+def test_topic_placement_balances_documents_when_topic_sizes_differ():
+    sizes = {"big": 50, "medium": 30, "small_a": 12, "small_b": 8}
+    docs = [Document(f"doc_{t}_{i}", "text", {"category": t}) for t, n in sizes.items() for i in range(n)]
+    s = HybridIndexingSystem.build(docs, num_nodes=2, strategy="topic")
+    counts = sorted(len(node.documents) for node in s.nodes.values())
+    assert counts == [50, 50]  # "big" alone, everything else together
