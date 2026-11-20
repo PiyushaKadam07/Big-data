@@ -16,32 +16,38 @@ All three return the same results. What changes is how many servers each search 
 
 ## What I found
 
-I indexed 2,000 documents across 2 to 16 servers and ran the same 60 searches at each size (top 5 results), once as plain word searches and once limited to a single year. How much hybrid saves depends on how documents are placed on the servers:
+I tested it on 20,000 real computer science papers from arXiv, split across 16 servers, with 30 searches like "graph neural networks", "differential privacy" and "robot grasping" (top 5 results). Each search was run as a plain word search and again limited to a single year. Distributed search always contacts all 16 servers. Hybrid contacted, on average:
 
-- **Random:** documents are spread evenly by hashing their ID.
-- **By topic:** each topic gets its own server.
-- **By date:** each server holds a range of dates, like the volumes of an encyclopedia.
+| Placement | Word search | + skip by score | One-year search | + skip by score |
+| --- | --- | --- | --- | --- |
+| Random | 16.0 | 16.0 | 16.0 | 16.0 |
+| By topic | 13.9 | **7.5** | 13.9 | 13.1 |
+| By date | 15.8 | 15.4 | **2.4** | 2.4 |
 
-| Approach (16 servers) | Word search | Word search limited to one year |
-| --- | --- | --- |
-| Distributed | 16 | 16 |
-| Hybrid, placed randomly | 9.8 | 9.1 |
-| Hybrid, grouped by topic | **1.9** | 2.4 |
-| Hybrid, grouped by date | 9.8 | **1.4** |
+The top 5 results were identical to centralized search for every search. The three placements:
 
-![Servers asked per word search as the system grows](assets/scale_chart.png)
+- **Random:** papers are spread evenly by hashing their ID.
+- **By topic:** each arXiv category (machine learning, vision, databases and so on) gets a home server.
+- **By date:** each server holds a range of submission dates, like the volumes of an encyclopedia.
 
-![Servers asked per search limited to one year](assets/scale_chart_dated.png)
+What the numbers say:
 
-Each placement wins a different kind of search. The directory can only skip a server if it knows that server can't have a match. With random placement every topic and every year ends up on almost every server, so there's little to skip. Grouping by topic keeps word searches down to about 2 servers however big the system gets. Grouping by date does the same for searches limited to certain years, but helps plain word searches no more than random placement, because every topic shows up every year. The takeaway is to store data the way people search it.
+1. **Knowing where words are isn't enough on real data.** Even with papers grouped by topic, hybrid still contacted 13.9 of 16 servers, because research words cross fields. Graph neural networks show up in machine learning, vision, chemistry and robotics papers, so nearly every server holds at least one match.
+2. **Knowing where the best matches are is what helps.** The directory also keeps each server's best possible score for each word. Hybrid asks the most promising server first, then skips any server that couldn't beat the 5th result it already has. With topic placement that cut it to 7.5 servers, 53% fewer than distributed, with exactly the same top 5.
+3. **Date placement wins when searches are limited by date.** A search limited to one year contacted 2.4 of 16 servers, 85% fewer than distributed, because the directory knows which servers hold which years.
+4. **Random placement saves nothing.** Every topic and every year ends up on every server.
 
-I also checked that hybrid and centralized search return exactly the same ranked results for every test query, with and without a date limit, so the savings don't come at the cost of missing documents.
+The takeaway is to place data the way people search it, and to route on where the best answers are, not just on where the words are.
 
-### Skipping servers that can't change the top results
+To reproduce these numbers, make the arXiv sample and run `python benchmark.py`.
 
-Knowing which words are on which server isn't always enough. On the arXiv sample, "graph neural networks" papers show up in machine learning, vision, robotics and chemistry, so every server holds a few matches, even though the best ones are almost all on the machine learning server. So the directory also keeps each server's best possible score for each word. Hybrid search asks the most promising server first, then skips any server whose best possible score couldn't beat the 5th result it already has. The top results are exactly the same as centralized search (the tests check this on hundreds of searches); the only thing lost is the total number of matches.
+### How it scales
 
-To measure all of this on real papers, run `python benchmark.py` after making the arXiv sample. It reports the servers contacted per search for each placement, with and without this skipping, and checks every result against centralized search.
+The app's "What happens at scale" page reruns a smaller version of the experiment on 2,000 generated documents across 2 to 16 servers. Generated text is much more regular than real abstracts (each topic uses its own small vocabulary), so routing looks better there than on real papers, but the pattern is the same: distributed grows with every server added, and the right placement keeps hybrid nearly flat.
+
+![Servers asked per word search as the system grows (generated documents)](assets/scale_chart.png)
+
+![Servers asked per search limited to one year (generated documents)](assets/scale_chart_dated.png)
 
 ### Matching all words or any word
 
