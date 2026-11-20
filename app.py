@@ -21,8 +21,9 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(__file__))
 from dataset_generator import TOPICS, generate_dataset  # noqa: E402
 from hybrid_index import (  # noqa: E402
-    SAMPLE_DOCS, TOKEN_PATTERN, Document, HybridIndexingSystem, tokenize,
+    SAMPLE_DOCS, TOKEN_PATTERN, Document, HybridIndexingSystem, sample_documents, tokenize, years_to_months,
 )
+from load_arxiv import submission_month  # noqa: E402
 
 st.set_page_config(page_title="Hybrid Indexing", page_icon="🔎", layout="wide")
 
@@ -30,7 +31,7 @@ st.set_page_config(page_title="Hybrid Indexing", page_icon="🔎", layout="wide"
 
 MODES = {
     "hybrid": {"name": "Hybrid", "color": "#0d9488",
-               "how": "Checks the directory, then asks only the servers that have your words."},
+               "how": "Checks the directory, then asks only the servers that can have a match."},
     "distributed": {"name": "Distributed", "color": "#ea580c",
                     "how": "Asks every server, every time."},
     "centralized": {"name": "Centralized", "color": "#7c3aed",
@@ -70,8 +71,24 @@ def server_name(node_id: str) -> str:
 
 PLACEMENTS = {
     "By topic (similar documents together)": "topic",
+    "By date (each server holds a range of years)": "range",
     "Randomly (spread evenly by hashing)": "hash",
 }
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December"]
+
+
+def month_name(month: int) -> str:
+    """202104 -> "April 2021"."""
+    return f"{MONTH_NAMES[month % 100 - 1]} {month // 100}"
+
+
+def year_span(node_id: str) -> str:
+    span = system.node_date_range(node_id)
+    if not span:
+        return "no dated documents"
+    first, last = span[0] // 100, span[1] // 100
+    return str(first) if first == last else f"{first}–{last}"
 
 
 ARXIV_PATH = os.path.join(os.path.dirname(__file__), "data", "arxiv_sample.jsonl")
@@ -96,17 +113,16 @@ def load_arxiv_papers() -> list[dict]:
 
 @st.cache_resource(show_spinner=False)
 def build_system(num_nodes: int, strategy: str, source: str) -> HybridIndexingSystem:
-    system = HybridIndexingSystem(num_nodes=num_nodes, strategy=strategy)
     if source == "arxiv":
-        for p in load_arxiv_papers():
-            system.add_document(Document(
-                doc_id=p["id"], content=f"{p['title']}. {p['abstract']}",
-                metadata={"category": p["category"], "title": p["title"], "abstract": p["abstract"],
-                          "authors": p.get("authors", ""), "url": f"https://arxiv.org/abs/{p['id']}"}))
+        docs = [Document(
+            doc_id=p["id"], content=f"{p['title']}. {p['abstract']}",
+            metadata={"category": p["category"], "title": p["title"], "abstract": p["abstract"],
+                      "month": p.get("month") or submission_month(p["id"]) or 0,
+                      "authors": p.get("authors", ""), "url": f"https://arxiv.org/abs/{p['id']}"})
+            for p in load_arxiv_papers()]
     else:
-        for i, (content, meta) in enumerate(SAMPLE_DOCS):
-            system.add_document(Document(doc_id=f"doc_{i:03d}", content=content, metadata=meta))
-    return system
+        docs = sample_documents()
+    return HybridIndexingSystem.build(docs, num_nodes=num_nodes, strategy=strategy)
 
 
 with st.sidebar:
@@ -118,8 +134,9 @@ with st.sidebar:
     st.markdown("**Setup**")
     num_nodes = st.select_slider("Number of servers", options=[2, 4, 6, 8], value=4)
     placement_label = st.radio("How documents are placed on servers", list(PLACEMENTS), index=0,
-                               help="Topic placement keeps related documents on the same server, "
-                                    "so the directory can rule out more servers.")
+                               help="Topic placement keeps related documents together, so word searches "
+                                    "can skip servers. Date placement gives each server a range of years, "
+                                    "so searches limited to certain years can skip servers.")
     strategy = PLACEMENTS[placement_label]
     if os.path.exists(ARXIV_PATH):
         source_label = st.radio("Documents to search",
@@ -137,8 +154,10 @@ with st.spinner("Building the index (the first time takes a few seconds)…"):
 
 # ── Drawing the journey of a search ───────────────────────────────────────────
 
-def matches_per_node(terms: list[str]) -> dict[str, int]:
-    return {nid: len({d for t in terms for d in node.inverted_index.get(t, {})})
+def matches_per_node(terms: list[str], months=None) -> dict[str, int]:
+    def in_range(node, doc_id):
+        return not months or months[0] <= node.doc_month.get(doc_id, 0) <= months[1]
+    return {nid: len({d for t in terms for d in node.inverted_index.get(t, {}) if in_range(node, d)})
             for nid, node in system.nodes.items()}
 
 
@@ -263,32 +282,45 @@ def page_search():
     st.text_input("What are you looking for?", key="query")
     st.pills("Or try one of these", examples, key="example", on_change=pick)
 
+    spans = [system.node_date_range(n) for n in system.nodes]
+    spans = [sp for sp in spans if sp]
+    months, when = None, ""
+    if spans:
+        first_year = min(sp[0] for sp in spans) // 100
+        last_year = max(sp[1] for sp in spans) // 100
+        if st.toggle("Only show documents from certain years") and first_year < last_year:
+            years = st.slider("Years", first_year, last_year, (max(first_year, last_year - 2), last_year))
+            months = years_to_months(*years)
+            when = f" from {years[0]}" if years[0] == years[1] else f" from {years[0]}–{years[1]}"
+
     query = st.session_state.query.strip()
     terms = tokenize(query)
     if not terms:
         st.info("Type a few words to search.")
         return
 
-    runs = {"hybrid": system.hybrid_search(query, top_k=5),
-            "distributed": system.distributed_search(query, top_k=5),
-            "centralized": system.centralized_search(query, top_k=5)}
+    runs = {"hybrid": system.hybrid_search(query, top_k=5, months=months),
+            "distributed": system.distributed_search(query, top_k=5, months=months),
+            "centralized": system.centralized_search(query, top_k=5, months=months)}
     found = runs["hybrid"]["total_matches"]
     asked = runs["hybrid"]["nodes_queried"]
     n = len(system.nodes)
 
     if found == 0:
-        headline = f"No document contains those words. The directory knew that, so hybrid asked **no servers at all**."
+        headline = (f"No document{when} contains those words. Hybrid asked **{asked} of {n} servers**; "
+                    f"the rest were ruled out by the directory.")
     elif asked < n:
-        headline = (f"All three found the same **{found:,} document{'s' if found != 1 else ''}**. "
+        headline = (f"All three found the same **{found:,} document{'s' if found != 1 else ''}{when}**. "
                     f"Hybrid asked **{asked} of {n} servers** and skipped **{n - asked}** that had nothing to offer.")
     else:
-        headline = (f"All three found the same **{found:,} documents**. Your words appear on every server, "
-                    f"so hybrid had to ask all {n}, the same as distributed. Hybrid saves the most on specific searches.")
+        headline = (f"All three found the same **{found:,} documents{when}**. Every server could have a match, "
+                    f"so hybrid had to ask all {n}, the same as distributed. Try a more specific search, "
+                    f"or a different placement in the sidebar.")
     headline = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", headline)
     st.markdown(f"<p class='headline'>{headline}</p>", unsafe_allow_html=True)
 
-    hits = matches_per_node(terms)
-    hybrid_asked = set(system.metadata.route_query(terms))
+    hits = matches_per_node(terms, months)
+    hybrid_asked = set(system.metadata.route_query(terms, months))
     cols = st.columns(3)
     for col, mode in zip(cols, ["hybrid", "distributed", "centralized"]):
         r, info = runs[mode], MODES[mode]
@@ -321,7 +353,8 @@ def page_search():
             f"{body}"
             f"<p class='why'>{explain(doc, terms)}</p>"
             f"<div class='meter' title='Match strength'><span style='width:{100 * r.score / best:.0f}%'></span></div>"
-            f"<p class='why' style='margin-top:0.35rem'>Stored on {server_name(r.node_id)}"
+            f"<p class='why' style='margin-top:0.35rem'>{month_name(doc.metadata['month'])} · "
+            f"stored on {server_name(r.node_id)}"
             f"<span class='chip'>{html.escape(topic)}</span></p>"
             f"</div></div>", unsafe_allow_html=True)
     if found > len(results):
@@ -374,10 +407,21 @@ def page_how():
     st.markdown("---")
     st.markdown("### Why placement matters")
     st.markdown(
-        "The directory can only skip a server if that server has **none** of your words. "
-        "If documents are scattered randomly, every topic ends up on every server and there's little to skip. "
-        "If documents on the same topic are kept together, most servers can be ruled out. "
-        "Switch **How documents are placed** in the sidebar and search again to see the difference, "
+        "When a new document arrives, something has to decide which server it goes on. "
+        "The directory can only skip a server if it knows that server can't have a match, "
+        "so this choice decides how much hybrid can save.")
+    st.markdown(
+        "| Placement | How documents are placed | What it's good for |\n"
+        "| --- | --- | --- |\n"
+        "| **Random** | Dealt out like cards, so every server gets the same amount | Even load, but every topic "
+        "and every year ends up on every server, so there's little to skip |\n"
+        "| **By topic** | Each topic gets its own server: machine learning here, databases there | "
+        "Word searches: “graph neural networks” only needs the machine learning server |\n"
+        "| **By date** | Each server holds a range of years, like encyclopedia volumes A–F, G–M | "
+        "Searches limited to certain years: “2021 only” needs just the server holding 2021 |")
+    st.markdown(
+        "No placement is best for everything: the right one depends on how people search. "
+        "Change **How documents are placed** in the sidebar and search again to see the difference, "
         "or open **What happens at scale**.")
 
 
@@ -385,87 +429,106 @@ def page_how():
 
 @st.cache_data(show_spinner=False)
 def scale_experiment(num_docs: int) -> dict:
-    """Index the same synthetic documents under different setups and count servers asked."""
-    docs = generate_dataset(num_docs, seed=42)
+    """Index the same generated documents under each placement and count the servers
+    asked, for plain word searches and for word searches limited to one year."""
+    docs = [Document(d["id"], d["content"], {"category": d["category"], "month": d["month"]})
+            for d in generate_dataset(num_docs, seed=42)]
     vocab = [t for topic in TOPICS.values() for t in topic["terms"]]
-    queries = random.Random(1).sample(vocab, 60)
+    rng = random.Random(1)
+    queries = rng.sample(vocab, 60)
+    years = [rng.randint(2015, 2024) for _ in queries]
     sizes = [2, 4, 8, 16]
-    out = {"sizes": sizes, "distributed": sizes, "hash": [], "topic": [], "identical": True}
-    for strat in ["hash", "topic"]:
+    out = {"sizes": sizes, "identical": True,
+           "words": {"distributed": sizes}, "dated": {"distributed": sizes}}
+    for strat in ["hash", "topic", "range"]:
+        out["words"][strat], out["dated"][strat] = [], []
         for n in sizes:
-            s = HybridIndexingSystem(num_nodes=n, strategy=strat)
-            for d in docs:
-                s.add_document(Document(d["id"], d["content"], {"category": d["category"]}))
-            asked = []
-            for q in queries:
+            s = HybridIndexingSystem.build(docs, num_nodes=n, strategy=strat)
+            words, dated = [], []
+            for q, y in zip(queries, years):
                 h = s.hybrid_search(q)
-                asked.append(h["nodes_queried"])
+                words.append(h["nodes_queried"])
+                dated.append(s.hybrid_search(q, months=years_to_months(y, y))["nodes_queried"])
                 if n == 8:
                     c = s.centralized_search(q)
                     if [r.doc_id for r in h["results"]] != [r.doc_id for r in c["results"]]:
                         out["identical"] = False
-            out[strat].append(round(statistics.mean(asked), 1))
+            out["words"][strat].append(round(statistics.mean(words), 1))
+            out["dated"][strat].append(round(statistics.mean(dated), 1))
     return out
 
 
-def page_scale():
-    st.title("What happens at scale")
-    st.markdown("Twenty documents is a toy. Here the system is rebuilt with thousands of documents "
-                "and up to 16 servers, and 60 different searches are run each time.")
-    num_docs = st.select_slider("How many documents", options=[500, 1000, 2000, 5000], value=2000)
-    with st.spinner("Building the indexes and running the searches…"):
-        r = scale_experiment(num_docs)
+LINES = [("distributed", "Distributed (asks every server)", MODES["distributed"]["color"], "dash"),
+         ("hash", "Hybrid, placed randomly", "#9ca3af", "solid"),
+         ("topic", "Hybrid, grouped by topic", MODES["hybrid"]["color"], "solid"),
+         ("range", "Hybrid, grouped by date", "#2563eb", "solid")]
 
-    i16 = r["sizes"].index(16)
-    topic16, hash16 = r["topic"][i16], r["hash"][i16]
-    saved = round(100 * (1 - topic16 / 16))
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(f"<p class='big-stat' style='color:{MODES['distributed']['color']}'>16</p>"
-                f"<p class='big-label'>servers asked per search by <b>distributed</b>, with 16 servers</p>",
-                unsafe_allow_html=True)
-    c2.markdown(f"<p class='big-stat' style='color:#9ca3af'>{hash16:g}</p>"
-                f"<p class='big-label'>asked by <b>hybrid</b> when documents are placed randomly</p>",
-                unsafe_allow_html=True)
-    c3.markdown(f"<p class='big-stat' style='color:{MODES['hybrid']['color']}'>{topic16:g}</p>"
-                f"<p class='big-label'>asked by <b>hybrid</b> when documents are grouped by topic — "
-                f"<b>{saved}% fewer</b> than distributed</p>", unsafe_allow_html=True)
 
+def scale_chart(r: dict, kind: str, title: str):
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=r["sizes"], y=r["distributed"], name="Distributed (asks every server)",
-                             mode="lines+markers", line=dict(color=MODES["distributed"]["color"], width=3)))
-    fig.add_trace(go.Scatter(x=r["sizes"], y=r["hash"], name="Hybrid, documents placed randomly",
-                             mode="lines+markers", line=dict(color="#9ca3af", width=3)))
-    fig.add_trace(go.Scatter(x=r["sizes"], y=r["topic"], name="Hybrid, documents grouped by topic",
-                             mode="lines+markers", line=dict(color=MODES["hybrid"]["color"], width=3)))
+    for key, name, color, dash in LINES:
+        fig.add_trace(go.Scatter(x=r["sizes"], y=r[kind][key], name=name, mode="lines+markers",
+                                 line=dict(color=color, width=3, dash=dash)))
     fig.update_layout(
-        title="Servers asked per search as the system grows (lower is better)",
-        xaxis=dict(title="Servers in the system", tickvals=r["sizes"]),
+        title=title, xaxis=dict(title="Servers in the system", tickvals=r["sizes"]),
         yaxis=dict(title="Servers asked per search", rangemode="tozero"),
-        legend=dict(orientation="h", y=-0.25), height=440, margin=dict(l=40, r=20, t=60, b=40),
+        legend=dict(orientation="h", y=-0.28), height=420, margin=dict(l=40, r=20, t=60, b=40),
         plot_bgcolor="#ffffff", paper_bgcolor="#ffffff")
     fig.update_xaxes(gridcolor="#f3f4f6")
     fig.update_yaxes(gridcolor="#f3f4f6")
     st.plotly_chart(fig, width="stretch")
 
+
+def page_scale():
+    st.title("What happens at scale")
+    st.markdown("Twenty documents is a toy. Here the system is rebuilt with thousands of documents "
+                "and up to 16 servers, and the same 60 searches are run each time.")
+    num_docs = st.select_slider("How many documents", options=[500, 1000, 2000, 5000], value=2000)
+    with st.spinner("Building the indexes and running the searches…"):
+        r = scale_experiment(num_docs)
+
+    i16 = r["sizes"].index(16)
+    w, d = r["words"], r["dated"]
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"<p class='big-stat' style='color:{MODES['distributed']['color']}'>16</p>"
+                f"<p class='big-label'>servers asked by <b>distributed</b> for every search, with 16 servers</p>",
+                unsafe_allow_html=True)
+    c2.markdown(f"<p class='big-stat' style='color:{MODES['hybrid']['color']}'>{w['topic'][i16]:g}</p>"
+                f"<p class='big-label'>asked by hybrid for a <b>word search</b> when documents are "
+                f"<b>grouped by topic</b></p>", unsafe_allow_html=True)
+    c3.markdown(f"<p class='big-stat' style='color:#2563eb'>{d['range'][i16]:g}</p>"
+                f"<p class='big-label'>asked by hybrid for a <b>search limited to one year</b> when documents are "
+                f"<b>grouped by date</b></p>", unsafe_allow_html=True)
+
+    st.markdown("### 1. Searching by words")
+    scale_chart(r, "words", "Word searches: servers asked as the system grows (lower is better)")
+    st.markdown("### 2. Searching by words within one year")
+    scale_chart(r, "dated", "Searches limited to one year: servers asked (lower is better)")
+
     st.markdown("### What this shows")
     st.markdown(
-        f"- **Distributed** work grows with every server you add: 16 servers means 16 messages for every search.\n"
-        f"- **Hybrid with random placement** helps only a little (about {hash16:g} of 16), because every topic "
-        f"ends up on almost every server.\n"
-        f"- **Hybrid with topic placement** stays almost flat at about {topic16:g} servers, however big the "
-        f"system gets. That's the real benefit of the design.")
+        f"- **Distributed** asks every server for every search, so its work grows with the system.\n"
+        f"- **Grouping by topic** wins for word searches: about {w['topic'][i16]:g} of 16 servers, "
+        f"because each topic lives on its own server.\n"
+        f"- **Grouping by date** wins when a search is limited to certain years: about {d['range'][i16]:g} of 16, "
+        f"because the directory knows which servers hold those years. For plain word searches it helps "
+        f"no more than random placement ({w['range'][i16]:g} vs {w['hash'][i16]:g}), since every topic appears every year.\n"
+        f"- **Random placement** is never the best at skipping servers, but it always keeps them evenly loaded.\n\n"
+        f"The lesson: **store data the way people search it.**")
     if r["identical"]:
         st.success("Check passed: hybrid and centralized returned exactly the same results for every test search.")
     st.caption("Speed isn't shown in milliseconds here: on one laptop every search takes well under a millisecond. "
                "On a real network, each server asked costs a round trip, so fewer servers asked means faster, "
-               "cheaper searches. The documents are generated from templates, so treat this as a demonstration.")
+               "cheaper searches. The documents are generated from templates with example dates, "
+               "so treat this as a demonstration.")
 
 
 # ── Page: Look inside the servers ─────────────────────────────────────────────
 
 def page_inside():
     st.title("Look inside the servers")
-    counts = {server_name(nid): len(node.documents) for nid, node in system.nodes.items()}
+    counts = {(f"{server_name(nid)}<br>{year_span(nid)}" if system.strategy == "range" else server_name(nid)):
+              len(node.documents) for nid, node in system.nodes.items()}
     fig = go.Figure(go.Bar(x=list(counts), y=list(counts.values()), marker_color=MODES["hybrid"]["color"],
                            text=list(counts.values()), textposition="outside"))
     fig.update_layout(title="Documents on each server", height=300, plot_bgcolor="#ffffff",

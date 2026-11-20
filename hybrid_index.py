@@ -12,6 +12,7 @@ All three return the same ranked results (BM25). They differ in how many nodes
 they contact and how much index data they read, which is what the benchmarks compare.
 """
 
+import bisect
 import hashlib
 import math
 import re
@@ -44,6 +45,14 @@ def tokenize(text: str) -> list[str]:
 # BM25 is the ranking formula used by Lucene and Elasticsearch. These are their defaults.
 BM25_K1 = 1.2   # how quickly repeating a word stops adding to the score
 BM25_B = 0.75   # how much long documents are penalized
+
+
+# A date range as (first month, last month), each written YYYYMM, e.g. (201901, 202112).
+Months = tuple[int, int] | None
+
+
+def years_to_months(first_year: int, last_year: int) -> tuple[int, int]:
+    return first_year * 100 + 1, last_year * 100 + 12
 
 
 @dataclass
@@ -95,6 +104,7 @@ class IndexNode:
         self.inverted_index: dict[str, dict[str, int]] = defaultdict(dict)
         self.documents: dict[str, Document] = {}
         self.doc_len: dict[str, int] = {}
+        self.doc_month: dict[str, int] = {}  # doc_id -> YYYYMM, when the document has a date
         self.query_count = 0
         self.postings_scanned = 0
         # Optional, fixed cost per request to stand in for a network round trip.
@@ -105,11 +115,14 @@ class IndexNode:
         terms = tokenize(doc.content)
         self.documents[doc.doc_id] = doc
         self.doc_len[doc.doc_id] = len(terms)
+        if "month" in doc.metadata:
+            self.doc_month[doc.doc_id] = doc.metadata["month"]
         for term, tf in Counter(terms).items():
             self.inverted_index[term][doc.doc_id] = tf
 
-    def search(self, terms: list[str], stats: CorpusStats) -> list[QueryResult]:
-        """Score every local document that contains at least one query term."""
+    def search(self, terms: list[str], stats: CorpusStats, months: Months = None) -> list[QueryResult]:
+        """Score every local document that contains at least one query term
+        (and, if `months` is given, is dated within that range)."""
         if self.network_delay_ms:
             time.sleep(self.network_delay_ms / 1000)
         self.query_count += 1
@@ -121,6 +134,8 @@ class IndexNode:
             idf = stats.idf(term)
             self.postings_scanned += len(postings)
             for doc_id, tf in postings.items():
+                if months and not months[0] <= self.doc_month.get(doc_id, 0) <= months[1]:
+                    continue
                 length_norm = 1 - BM25_B + BM25_B * self.doc_len[doc_id] / stats.avg_doc_len
                 scores[doc_id] += idf * tf * (BM25_K1 + 1) / (tf + BM25_K1 * length_norm)
         return [QueryResult(doc_id=d, node_id=self.node_id, score=s) for d, s in scores.items()]
@@ -152,11 +167,16 @@ class CentralMetadataIndex:
         self.doc_freq: Counter = Counter()
         self.total_terms = 0
         self.lookups = 0
+        self.node_months: dict[str, list[int]] = {}  # node -> [earliest, latest] month it holds
 
     def register_document(self, doc: Document, node_id: str):
         terms = tokenize(doc.content)
         self.doc_to_node[doc.doc_id] = node_id
         self.total_terms += len(terms)
+        month = doc.metadata.get("month")
+        if month is not None:
+            span = self.node_months.setdefault(node_id, [month, month])
+            span[0], span[1] = min(span[0], month), max(span[1], month)
         for term in set(terms):
             self.term_to_nodes[term].add(node_id)
             self.doc_freq[term] += 1
@@ -169,13 +189,31 @@ class CentralMetadataIndex:
         return CorpusStats(doc_count=n, avg_doc_len=(self.total_terms / n) if n else 1.0,
                            doc_freq=self.doc_freq)
 
-    def route_query(self, terms: list[str]) -> set[str]:
-        """The smallest set of nodes that can hold a match."""
+    def route_query(self, terms: list[str], months: Months = None) -> set[str]:
+        """The smallest set of nodes that can hold a match: they must have one of the
+        terms and, if a date range is given, hold documents from that range."""
         self.lookups += 1
         candidates: set[str] = set()
         for term in terms:
             candidates |= self.term_to_nodes.get(term, set())
+        if months:
+            candidates = {n for n in candidates
+                          if n in self.node_months
+                          and self.node_months[n][0] <= months[1] and self.node_months[n][1] >= months[0]}
         return candidates
+
+
+# ─── Range boundaries ─────────────────────────────────────────────────────────
+
+def even_range_bounds(months: list[int], num_nodes: int) -> list[int]:
+    """Choose where each node's date range starts so the nodes hold about the same
+    number of documents (the same idea as splitting an encyclopedia into volumes of
+    similar size). Returns the first month of every node after the first."""
+    ordered = sorted(months)
+    if not ordered or num_nodes < 2:
+        return []
+    cuts = {ordered[i * len(ordered) // num_nodes] for i in range(1, num_nodes)}
+    return sorted(c for c in cuts if c > ordered[0])
 
 
 # ─── Hybrid Indexing System ───────────────────────────────────────────────────
@@ -187,10 +225,24 @@ class HybridIndexingSystem:
     layer (used by both distributed and hybrid search).
     """
 
-    def __init__(self, num_nodes: int = 4, strategy: str = "hash", network_delay_ms: float = 0.0):
-        if strategy not in ("hash", "topic"):
-            raise ValueError(f"strategy must be 'hash' or 'topic', not {strategy!r}")
-        self.strategy = strategy  # "hash" (random spread) or "topic" (same topic together)
+    def __init__(self, num_nodes: int = 4, strategy: str = "hash", network_delay_ms: float = 0.0,
+                 range_bounds: list[int] | None = None):
+        """
+        strategy:
+          "hash"  - spread documents evenly at random
+          "topic" - keep documents on the same topic together
+          "range" - each node holds a range of dates; range_bounds gives the first month
+                    (YYYYMM) of every node after the first, e.g. [201901, 202101, 202301]
+        """
+        if strategy not in ("hash", "topic", "range"):
+            raise ValueError(f"strategy must be 'hash', 'topic' or 'range', not {strategy!r}")
+        if strategy == "range":
+            if not range_bounds or list(range_bounds) != sorted(set(range_bounds)):
+                raise ValueError("range placement needs increasing range_bounds; see even_range_bounds()")
+            if len(range_bounds) >= num_nodes:
+                raise ValueError("range placement needs fewer bounds than nodes")
+        self.strategy = strategy
+        self.range_bounds = list(range_bounds or [])
         self.topic_home: dict[str, str] = {}  # topic -> node, used by the "topic" strategy
         self.network_delay_ms = network_delay_ms
         self.nodes: dict[str, IndexNode] = {
@@ -212,6 +264,10 @@ class HybridIndexingSystem:
         }
 
     def _assign_node(self, doc: Document) -> str:
+        if self.strategy == "range":
+            # Like volumes of an encyclopedia: find the range this document's date falls in.
+            month = doc.metadata.get("month", 0)
+            return self.node_ids[bisect.bisect_right(self.range_bounds, month)]
         if self.strategy == "topic":
             # Keep documents on the same topic together: each topic gets a "home" node,
             # chosen as the least-loaded node when the topic is first seen.
@@ -223,6 +279,25 @@ class HybridIndexingSystem:
         # "hash": spread documents evenly and at random by hashing their id
         h = int(hashlib.md5(doc.doc_id.encode()).hexdigest(), 16)
         return self.node_ids[h % len(self.node_ids)]
+
+    @classmethod
+    def build(cls, docs: list[Document], num_nodes: int = 4, strategy: str = "hash",
+              network_delay_ms: float = 0.0) -> "HybridIndexingSystem":
+        """Index a list of documents. For range placement the date ranges are chosen
+        from the documents so every node gets about the same number of them."""
+        bounds = None
+        if strategy == "range":
+            bounds = even_range_bounds([d.metadata.get("month", 0) for d in docs], num_nodes)
+        system = cls(num_nodes=num_nodes, strategy=strategy, network_delay_ms=network_delay_ms,
+                     range_bounds=bounds)
+        for doc in docs:
+            system.add_document(doc)
+        return system
+
+    def node_date_range(self, node_id: str) -> tuple[int, int] | None:
+        """The earliest and latest month a node holds, or None if it holds no dated documents."""
+        span = self.metadata.node_months.get(node_id)
+        return (span[0], span[1]) if span else None
 
     def add_document(self, doc: Document):
         node_id = self._assign_node(doc)
@@ -237,11 +312,12 @@ class HybridIndexingSystem:
 
     # ── search ──
 
-    def _query_nodes(self, node_ids: list[str], terms: list[str], stats: CorpusStats) -> list[QueryResult]:
+    def _query_nodes(self, node_ids: list[str], terms: list[str], stats: CorpusStats,
+                     months: Months = None) -> list[QueryResult]:
         """Send the query to the given nodes at the same time and merge the answers."""
         if len(node_ids) <= 1:
-            return [r for nid in node_ids for r in self.nodes[nid].search(terms, stats)]
-        futures = [self._pool.submit(self.nodes[nid].search, terms, stats) for nid in node_ids]
+            return [r for nid in node_ids for r in self.nodes[nid].search(terms, stats, months)]
+        futures = [self._pool.submit(self.nodes[nid].search, terms, stats, months) for nid in node_ids]
         return [r for f in futures for r in f.result()]
 
     def _finish(self, mode: str, results: list[QueryResult], nodes_queried: int,
@@ -254,26 +330,26 @@ class HybridIndexingSystem:
                 "nodes_queried": nodes_queried, "total_nodes": len(self.nodes),
                 "latency_ms": elapsed, "mode": mode}
 
-    def hybrid_search(self, query: str, top_k: int = 10) -> dict:
-        """Ask the metadata index which nodes hold the terms, then query only those."""
+    def hybrid_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
+        """Ask the metadata index which nodes can have matches, then query only those."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        targets = sorted(self.metadata.route_query(terms))
-        results = self._query_nodes(targets, terms, self.metadata.stats())
+        targets = sorted(self.metadata.route_query(terms, months))
+        results = self._query_nodes(targets, terms, self.metadata.stats(), months)
         return self._finish("hybrid", results, len(targets), t0, top_k)
 
-    def distributed_search(self, query: str, top_k: int = 10) -> dict:
+    def distributed_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
         """Broadcast the query to every node, with no routing."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        results = self._query_nodes(self.node_ids, terms, self.metadata.stats())
+        results = self._query_nodes(self.node_ids, terms, self.metadata.stats(), months)
         return self._finish("distributed", results, len(self.node_ids), t0, top_k)
 
-    def centralized_search(self, query: str, top_k: int = 10) -> dict:
+    def centralized_search(self, query: str, top_k: int = 10, months: Months = None) -> dict:
         """One index holding every document."""
         terms = tokenize(query)
         t0 = time.perf_counter()
-        results = self.central.search(terms, self.metadata.stats())
+        results = self.central.search(terms, self.metadata.stats(), months)
         return self._finish("centralized", results, 1, t0, top_k)
 
     # ── reporting ──
@@ -321,12 +397,15 @@ SAMPLE_DOCS = [
 ]
 
 
+def sample_documents() -> list[Document]:
+    """The sample sentences as documents, each given an example date between 2015 and 2024."""
+    return [Document(doc_id=f"doc_{i:03d}", content=content,
+                     metadata={**meta, "month": (2015 + i % 10) * 100 + 1 + (i * 5) % 12})
+            for i, (content, meta) in enumerate(SAMPLE_DOCS)]
+
+
 def build_demo_system(num_nodes: int = 4, strategy: str = "hash") -> HybridIndexingSystem:
-    sys = HybridIndexingSystem(num_nodes=num_nodes, strategy=strategy)
-    for i, (content, meta) in enumerate(SAMPLE_DOCS):
-        doc = Document(doc_id=f"doc_{i:03d}", content=content, metadata=meta)
-        sys.add_document(doc)
-    return sys
+    return HybridIndexingSystem.build(sample_documents(), num_nodes=num_nodes, strategy=strategy)
 
 
 if __name__ == "__main__":

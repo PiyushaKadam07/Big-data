@@ -1,3 +1,4 @@
+import hashlib
 import random
 import json
 
@@ -87,7 +88,17 @@ def generate_doc(doc_id, idx, rng=random):
 def generate_dataset(n=1000, seed=None):
     """n synthetic documents; pass a seed to get the same documents every time."""
     rng = random.Random(seed)
-    return [generate_doc(f"doc_{i:04d}", i, rng) for i in range(n)]
+    docs = [generate_doc(f"doc_{i:04d}", i, rng) for i in range(n)]
+    for d in docs:
+        d["month"] = example_month(d["id"])
+    return docs
+
+
+def example_month(doc_id: str) -> int:
+    """A repeatable example date (YYYYMM) between 2015 and 2024, taken from the id
+    so the generated text stays the same."""
+    h = int(hashlib.md5(doc_id.encode()).hexdigest(), 16)
+    return (2015 + h % 10) * 100 + 1 + (h // 10) % 12
 
 if __name__ == "__main__":
     import os

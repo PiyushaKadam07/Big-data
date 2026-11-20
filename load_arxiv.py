@@ -30,14 +30,30 @@ def read_cs_papers(path: str):
             title = " ".join(paper.get("title", "").split())
             if not abstract or not title:
                 continue
+            month = submission_month(paper["id"])
+            if month is None:
+                continue
             yield {
                 "id": paper["id"],
+                "month": month,
                 "title": title,
                 "abstract": abstract,
                 "category": categories[0],
                 "authors": paper.get("authors", ""),
                 "date": paper.get("update_date", ""),
             }
+
+
+def submission_month(paper_id: str) -> int | None:
+    """The month a paper was first submitted, as YYYYMM, read from its id.
+    New ids look like "2104.01234" (April 2021); old ones like "cs/9901001" (January 1999)."""
+    digits = paper_id.split("/")[-1][:4]
+    if not digits.isdigit():
+        return None
+    yy, mm = int(digits[:2]), int(digits[2:])
+    if not 1 <= mm <= 12:
+        return None
+    return (1900 + yy if yy >= 90 else 2000 + yy) * 100 + mm
 
 
 def sample(papers, size: int, seed: int = 42) -> list[dict]:

@@ -1,6 +1,7 @@
 import pytest
 
-from hybrid_index import Document, HybridIndexingSystem, build_demo_system, tokenize
+from hybrid_index import (Document, HybridIndexingSystem, build_demo_system, even_range_bounds,
+                          tokenize, years_to_months)
 
 QUERIES = [
     "distributed indexing nodes",
@@ -82,4 +83,42 @@ def test_topic_placement_keeps_a_topic_on_one_node_and_still_matches_centralized
 
 def test_unknown_placement_is_rejected():
     with pytest.raises(ValueError):
+        HybridIndexingSystem(num_nodes=2, strategy="random")
+
+
+def test_range_placement_needs_bounds():
+    with pytest.raises(ValueError):
         HybridIndexingSystem(num_nodes=2, strategy="range")
+
+
+def test_range_placement_gives_each_node_its_own_date_range():
+    s = build_demo_system(num_nodes=4, strategy="range")
+    spans = sorted(s.node_date_range(n) for n in s.nodes)
+    for (_, end), (start, _) in zip(spans, spans[1:]):
+        assert end < start  # no overlap between neighbouring nodes
+    assert all(len(node.documents) == 5 for node in s.nodes.values())  # 20 documents, evenly split
+
+
+def test_even_range_bounds_balance_the_nodes():
+    months = [201901] * 10 + [202001] * 10 + [202101] * 10 + [202201] * 10
+    assert even_range_bounds(months, 4) == [202001, 202101, 202201]
+
+
+@pytest.mark.parametrize("strategy", ["hash", "topic", "range"])
+@pytest.mark.parametrize("query", QUERIES)
+def test_date_filtered_results_are_identical_in_every_mode(strategy, query):
+    s = build_demo_system(num_nodes=4, strategy=strategy)
+    months = years_to_months(2017, 2020)
+    hybrid = s.hybrid_search(query, months=months)
+    assert ids(hybrid) == ids(s.distributed_search(query, months=months)) == ids(s.centralized_search(query, months=months))
+    for r in hybrid["results"]:
+        assert months[0] <= s.get_document(r.doc_id).metadata["month"] <= months[1]
+
+
+def test_range_placement_lets_a_date_search_skip_other_years():
+    by_range = build_demo_system(num_nodes=4, strategy="range")
+    by_hash = build_demo_system(num_nodes=4, strategy="hash")
+    one_year = years_to_months(2016, 2016)
+    query = "distributed search data indexes"
+    assert by_range.hybrid_search(query, months=one_year)["nodes_queried"] == 1
+    assert by_hash.hybrid_search(query, months=one_year)["nodes_queried"] > 1
